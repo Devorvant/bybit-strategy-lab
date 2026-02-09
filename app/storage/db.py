@@ -4,13 +4,18 @@ Default: SQLite (DB_PATH).
 If DATABASE_URL is set (e.g. Railway Postgres), uses Postgres.
 
 Schema is shared across both engines (bars + signals).
+
+Important for Postgres:
+- ts is stored in milliseconds (epoch ms), so it must be BIGINT (int8).
+  If tables were created with INTEGER (int4), inserts will fail with "integer out of range".
+  We auto-migrate bars.ts and signals.ts to BIGINT on startup.
 """
 
 from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Iterable, Optional, Sequence, Tuple
+from typing import Iterable, Optional, Tuple
 
 from app.config import settings
 
@@ -38,6 +43,41 @@ def get_conn():
     return sqlite3.connect(db_path, check_same_thread=False)
 
 
+def _ensure_ts_bigint(conn) -> None:
+    """Railway Postgres: ensure ts columns are BIGINT (ms epoch doesn't fit into INT4)."""
+    if not _is_postgres():
+        return
+
+    try:
+        with conn.cursor() as cur:
+            # Check current type of bars.ts
+            cur.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name='bars' AND column_name='ts'"
+            )
+            row = cur.fetchone()
+            bars_ts_type = row[0] if row else None
+
+        if bars_ts_type == "integer":
+            print("[db] migrating ts columns to BIGINT ...")
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE bars ALTER COLUMN ts TYPE BIGINT USING ts::bigint;")
+                # signals table may or may not exist depending on schema execution
+                cur.execute(
+                    "DO $$ BEGIN "
+                    "IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='signals') THEN "
+                    "  ALTER TABLE signals ALTER COLUMN ts TYPE BIGINT USING ts::bigint; "
+                    "END IF; "
+                    "END $$;"
+                )
+            conn.commit()
+            print("[db] migration done: ts is BIGINT")
+    except Exception:
+        # If anything fails, rollback so the connection doesn't get stuck in aborted state
+        conn.rollback()
+        raise
+
+
 def init_db():
     conn = get_conn()
     schema_path = os.path.join("app", "storage", "schema.sql")
@@ -50,9 +90,13 @@ def init_db():
         for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
             cur.execute(stmt + ";")
         conn.commit()
+
+        # Auto-fix old schema (ts INTEGER) -> BIGINT
+        _ensure_ts_bigint(conn)
     else:
         conn.executescript(ddl)
         conn.commit()
+
     return conn
 
 
@@ -74,9 +118,14 @@ def upsert_bars(conn, symbol: str, tf: str, rows: Iterable[Tuple[int, float, flo
             "o=EXCLUDED.o, h=EXCLUDED.h, l=EXCLUDED.l, c=EXCLUDED.c, v=EXCLUDED.v"
         )
         values = [(symbol, tf, *r) for r in rows_list]
-        with conn.cursor() as cur:
-            execute_values(cur, sql, values, page_size=1000)
-        conn.commit()
+
+        try:
+            with conn.cursor() as cur:
+                execute_values(cur, sql, values, page_size=1000)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         return
 
     # SQLite
@@ -134,18 +183,22 @@ def bars_min_max_ts(conn, symbol: str, tf: str) -> Tuple[Optional[int], Optional
 
 def save_signal(conn, symbol: str, tf: str, ts: int, signal: str, note: str = ""):
     if _is_postgres():
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO signals(symbol, tf, ts, signal, note)
-                VALUES(%s,%s,%s,%s,%s)
-                ON CONFLICT(symbol, tf, ts) DO UPDATE SET
-                    signal=EXCLUDED.signal,
-                    note=EXCLUDED.note
-                """,
-                (symbol, tf, ts, signal, note),
-            )
-        conn.commit()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO signals(symbol, tf, ts, signal, note)
+                    VALUES(%s,%s,%s,%s,%s)
+                    ON CONFLICT(symbol, tf, ts) DO UPDATE SET
+                        signal=EXCLUDED.signal,
+                        note=EXCLUDED.note
+                    """,
+                    (symbol, tf, ts, signal, note),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     else:
         conn.execute(
             """

@@ -27,12 +27,23 @@ class Trade:
     pnl: float  # USD
 
 @dataclass
+class OpenPosition:
+    side: Side
+    entry_ts: int
+    entry_price: float
+    current_ts: int
+    current_price: float
+    unrealized_pnl: float  # USD
+
+
+@dataclass
 class BacktestResult:
     trades: List[Trade]
     equity_ts: List[int]
     equity: List[float]
     fast: List[Optional[float]]
     slow: List[Optional[float]]
+    open_position: Optional[OpenPosition] = None
 
 def backtest_sma_cross(
     bars: List[Bar],
@@ -42,7 +53,7 @@ def backtest_sma_cross(
     close_at_end: bool = True,
 ) -> BacktestResult:
     if not bars:
-        return BacktestResult([], [], [], [], [])
+        return BacktestResult([], [], [], [], [], None)
 
     ts = [b[0] for b in bars]
     close = [b[4] for b in bars]
@@ -109,6 +120,21 @@ def backtest_sma_cross(
                 entry_ts = t
                 entry_price = px
 
+    # информация об открытой позиции (если не закрываем в конце)
+    open_position: Optional[OpenPosition] = None
+    if pos != 0:
+        current_px = close[-1]
+        current_t = ts[-1]
+        unreal = position_usd * pos * (current_px - entry_price) / entry_price
+        open_position = OpenPosition(
+            side="LONG" if pos == 1 else "SHORT",
+            entry_ts=entry_ts,
+            entry_price=entry_price,
+            current_ts=current_t,
+            current_price=current_px,
+            unrealized_pnl=unreal,
+        )
+
     # закрыть позицию в конце (чтобы equity финализировалась)
     if close_at_end and pos != 0:
         px = close[-1]
@@ -119,4 +145,4 @@ def backtest_sma_cross(
         if equity:
             equity[-1] = realized
 
-    return BacktestResult(trades, equity_ts, equity, fast, slow)
+        return BacktestResult(trades, equity_ts, equity, fast, slow, open_position)

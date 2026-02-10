@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import html
 from typing import Iterable, List, Optional, Sequence, Tuple
 
@@ -205,9 +206,14 @@ def _build_trades_table_html(bt) -> str:
     trades = list(getattr(bt, "trades", []) or [])
 
     def dt_str(ts: int) -> str:
-        """ts(ms) -> YYYY-MM-DD HH:MM:SS (UTC)."""
+        """Format timestamp to a readable UTC datetime.
+
+        Bybit kline timestamps are in **milliseconds**, but we also tolerate seconds.
+        """
         try:
-            return datetime.utcfromtimestamp(int(ts) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            ts_int = int(ts)
+            secs = (ts_int / 1000.0) if ts_int > 10_000_000_000 else float(ts_int)
+            return datetime.datetime.utcfromtimestamp(secs).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return str(ts)
 
@@ -251,8 +257,8 @@ def _build_trades_table_html(bt) -> str:
           <td class="type">{html.escape(trade_type)}</td>
           <td class="side">{html.escape(side)}</td>
           <td class="{reason_cls}">{html.escape(reason_norm)}</td>
-          <td>{html.escape(entry_dt)}</td>
-          <td>{html.escape(exit_dt)}</td>
+          <td class="dt">{html.escape(entry_dt)}</td>
+          <td class="dt">{html.escape(exit_dt)}</td>
           <td class="px">{html.escape(entry_px)}</td>
           <td class="px">{html.escape(exit_px)}</td>
           <td class="pnl {pnl_cls}">{pnl:,.2f}</td>
@@ -446,7 +452,7 @@ def make_chart_html(
     .trades-table td.px {{ text-align: right; }}
     .pnl-pos {{ color: #7CFC00; }}
     .pnl-neg {{ color: #FF6B6B; }}
-    .reason.stop {{ color: #FFB86C; font-weight: 700; }}
+    .reason-stop {{ color: #FFB86C; font-weight: 700; }}
     /* Plotly uses white background by default; keep it readable */
     .plotly-graph-div {{ border-radius: 14px; overflow: hidden; }}
   </style>

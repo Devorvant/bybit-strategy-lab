@@ -205,8 +205,9 @@ def _build_trades_table_html(bt) -> str:
     trades = list(getattr(bt, "trades", []) or [])
 
     def dt_str(ts: int) -> str:
+        """ts(ms) -> YYYY-MM-DD HH:MM:SS (UTC)."""
         try:
-            return datetime.utcfromtimestamp(int(ts) / 1000).strftime("%Y-%m-%d %H:%M")
+            return datetime.utcfromtimestamp(int(ts) / 1000).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             return str(ts)
 
@@ -232,6 +233,7 @@ def _build_trades_table_html(bt) -> str:
         trade_no: int,
         trade_type: str,
         side: str,
+        reason: str,
         entry_dt: str,
         exit_dt: str,
         entry_px: str,
@@ -241,11 +243,14 @@ def _build_trades_table_html(bt) -> str:
     ) -> str:
         pnl_cls = "pnl-pos" if pnl >= 0 else "pnl-neg"
         cum_cls = "pnl-pos" if cum_val >= 0 else "pnl-neg"
+        reason_norm = (reason or "").upper()
+        reason_cls = "reason-stop" if reason_norm == "STOP" else "reason"
         return f"""
         <tr>
           <td class="num">{trade_no}</td>
           <td class="type">{html.escape(trade_type)}</td>
           <td class="side">{html.escape(side)}</td>
+          <td class="{reason_cls}">{html.escape(reason_norm)}</td>
           <td>{html.escape(entry_dt)}</td>
           <td>{html.escape(exit_dt)}</td>
           <td class="px">{html.escape(entry_px)}</td>
@@ -265,7 +270,20 @@ def _build_trades_table_html(bt) -> str:
         exit_dt = dt_str(getattr(open_pos, "current_ts", getattr(open_pos, "entry_ts", 0))) + " (OPEN)"
         entry_px = f"{float(getattr(open_pos, 'entry_price', 0.0)):.6g}"
         exit_px = f"{float(getattr(open_pos, 'current_price', 0.0)):.6g}"
-        rows.append(row_html(trade_no, "OPEN", side, entry_dt, exit_dt, entry_px, exit_px, open_pnl, net_pnl))
+        rows.append(
+            row_html(
+                trade_no,
+                "OPEN",
+                side,
+                "OPEN",
+                entry_dt,
+                exit_dt,
+                entry_px,
+                exit_px,
+                open_pnl,
+                net_pnl,
+            )
+        )
 
     # закрытые сделки: newest-first, но trade_no из хронологии
     for trade_no, tr in reversed(list(enumerate(trades, start=1))):
@@ -276,7 +294,21 @@ def _build_trades_table_html(bt) -> str:
         exit_px = f"{float(getattr(tr, 'exit_price', 0.0)):.6g}"
         pnl = float(getattr(tr, "pnl", 0.0))
         cum_val = float(cum_pnl[trade_no - 1]) if cum_pnl else 0.0
-        rows.append(row_html(trade_no, "CLOSED", side, entry_dt, exit_dt, entry_px, exit_px, pnl, cum_val))
+        reason = str(getattr(tr, "exit_reason", "CROSS"))
+        rows.append(
+            row_html(
+                trade_no,
+                "CLOSED",
+                side,
+                reason,
+                entry_dt,
+                exit_dt,
+                entry_px,
+                exit_px,
+                pnl,
+                cum_val,
+            )
+        )
 
     rows_html = "\n".join(rows)
 
@@ -298,6 +330,7 @@ def _build_trades_table_html(bt) -> str:
               <th>#</th>
               <th>Type</th>
               <th>Side</th>
+              <th>Reason</th>
               <th>Entry time</th>
               <th>Exit time</th>
               <th>Entry px</th>
@@ -340,7 +373,8 @@ def make_chart_html(
 
     # Build trades table (TradingView-like)
     try:
-        bt = backtest_sma_cross(bars)
+        # close_at_end=False чтобы отображать открытую позицию (если она есть)
+        bt = backtest_sma_cross(bars, close_at_end=False)
         trades_table_html = _build_trades_table_html(bt)
     except Exception as e:
         trades_table_html = f"<div class=\"trades-empty\">Trades table error: {html.escape(str(e))}</div>"
@@ -394,6 +428,25 @@ def make_chart_html(
     .btn.primary {{ background: rgba(37,99,235,0.15); border-color: rgba(37,99,235,0.45); }}
     .chart-wrap {{ padding: 10px; background: #0b1220; }}
     .trades-wrap {{ padding: 10px; background: #0b1220; }}
+    .trades-table table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    .trades-table th, .trades-table td {{
+      padding: 6px 8px;
+      border: 1px solid rgba(255,255,255,0.14);
+      text-align: left;
+      white-space: nowrap;
+    }}
+    .trades-table th {{ font-weight: 600; color: rgba(255,255,255,0.92); }}
+    .trades-table td {{ color: rgba(255,255,255,0.88); }}
+    .trades-table thead th {{ position: sticky; top: 0; background: #0b1220; z-index: 2; }}
+    .trades-table tbody tr:nth-child(odd) {{ background: rgba(255,255,255,0.02); }}
+    .trades-table tbody tr:hover {{ background: rgba(255,255,255,0.05); }}
+
+    .trades-table td.num {{ text-align: right; width: 40px; }}
+    .trades-table td.dt {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
+    .trades-table td.px {{ text-align: right; }}
+    .pnl-pos {{ color: #7CFC00; }}
+    .pnl-neg {{ color: #FF6B6B; }}
+    .reason.stop {{ color: #FFB86C; font-weight: 700; }}
     /* Plotly uses white background by default; keep it readable */
     .plotly-graph-div {{ border-radius: 14px; overflow: hidden; }}
   </style>

@@ -195,6 +195,106 @@ def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float
     return fig.to_html(include_plotlyjs="cdn", full_html=False)
 
 
+def _build_trades_table_html(bt) -> str:
+    """TradingView-like trades list.
+
+    bt is BacktestResult returned by `backtest_sma_cross`.
+    """
+    trades = getattr(bt, "trades", None) or []
+    if not trades:
+        return "<div class=\"trades-empty\">No trades</div>"
+
+    # Summary
+    pnls = [float(getattr(t, "pnl", 0.0) or 0.0) for t in trades]
+    total_pnl = sum(pnls)
+    wins = sum(1 for p in pnls if p > 0)
+    win_rate = (wins / len(pnls)) * 100.0 if pnls else 0.0
+    avg_pnl = total_pnl / len(pnls) if pnls else 0.0
+
+    # Build rows
+    rows = []
+    cum = 0.0
+    for i, t in enumerate(trades, start=1):
+        side = html.escape(str(getattr(t, "side", "")))
+        entry_ts = int(getattr(t, "entry_ts", 0) or 0)
+        exit_ts = int(getattr(t, "exit_ts", 0) or 0)
+        entry_px = float(getattr(t, "entry_price", 0.0) or 0.0)
+        exit_px = float(getattr(t, "exit_price", 0.0) or 0.0)
+        pnl = float(getattr(t, "pnl", 0.0) or 0.0)
+        cum += pnl
+
+        entry_dt = pd.to_datetime(entry_ts, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M")
+        exit_dt = pd.to_datetime(exit_ts, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M")
+        dur_s = max(0, (exit_ts - entry_ts) / 1000.0)
+        dur_h = dur_s / 3600.0
+
+        pnl_cls = "pnl-pos" if pnl > 0 else ("pnl-neg" if pnl < 0 else "pnl-zero")
+
+        rows.append(
+            """
+            <tr>
+              <td class=\"num\">{i}</td>
+              <td class=\"side\">{side}</td>
+              <td>{entry_dt}</td>
+              <td class=\"num\">{entry_px:.6g}</td>
+              <td>{exit_dt}</td>
+              <td class=\"num\">{exit_px:.6g}</td>
+              <td class=\"num {pnl_cls}\">{pnl:.2f}</td>
+              <td class=\"num\">{cum:.2f}</td>
+              <td class=\"num\">{dur_h:.2f}h</td>
+            </tr>
+            """.format(
+                i=i,
+                side=side,
+                entry_dt=entry_dt,
+                entry_px=entry_px,
+                exit_dt=exit_dt,
+                exit_px=exit_px,
+                pnl_cls=pnl_cls,
+                pnl=pnl,
+                cum=cum,
+                dur_h=dur_h,
+            )
+        )
+
+    rows_html = "\n".join(rows)
+
+    return f"""
+<section class=\"trades\">
+  <div class=\"trades-head\">
+    <div class=\"trades-title\">Trades</div>
+    <div class=\"trades-metrics\">
+      <span><b>{len(trades)}</b> trades</span>
+      <span>Win rate <b>{win_rate:.1f}%</b></span>
+      <span>Net PnL <b class=\"{('pnl-pos' if total_pnl>0 else 'pnl-neg' if total_pnl<0 else 'pnl-zero')}\">{total_pnl:.2f}</b></span>
+      <span>Avg <b>{avg_pnl:.2f}</b></span>
+    </div>
+  </div>
+
+  <div class=\"table-wrap\">
+    <table class=\"trades-table\">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Side</th>
+          <th>Entry time (UTC)</th>
+          <th class=\"num\">Entry</th>
+          <th>Exit time (UTC)</th>
+          <th class=\"num\">Exit</th>
+          <th class=\"num\">PnL</th>
+          <th class=\"num\">Cum PnL</th>
+          <th class=\"num\">Dur</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows_html}
+      </tbody>
+    </table>
+  </div>
+</section>
+"""
+
+
 def make_chart_html(
     bars: Sequence[Tuple[int, float, float, float, float, float]],
     *,
@@ -219,6 +319,13 @@ def make_chart_html(
         tfs_list = [tf] + [x for x in tfs_list if x != tf]
 
     plot_html = _build_plot_html(bars)
+
+    # Build trades table (TradingView-like)
+    try:
+        bt = backtest_sma_cross(bars)
+        trades_table_html = _build_trades_table_html(bt)
+    except Exception as e:
+        trades_table_html = f"<div class=\"trades-empty\">Trades table error: {html.escape(str(e))}</div>"
 
     # Build dropdown options
     symbol_options = "\n".join(f'<option value="{html.escape(s)}"></option>' for s in symbols_list)
@@ -268,6 +375,7 @@ def make_chart_html(
     .btn.active {{ background: #2563eb; border-color: #2563eb; }}
     .btn.primary {{ background: rgba(37,99,235,0.15); border-color: rgba(37,99,235,0.45); }}
     .chart-wrap {{ padding: 10px; background: #0b1220; }}
+    .trades-wrap {{ padding: 10px; background: #0b1220; }}
     /* Plotly uses white background by default; keep it readable */
     .plotly-graph-div {{ border-radius: 14px; overflow: hidden; }}
   </style>
@@ -297,9 +405,13 @@ def make_chart_html(
     </div>
   </div>
 
-  <div class=\"chart-wrap\">
-    {plot_html}
-  </div>
+	  <div class=\"chart-wrap\">
+	    {plot_html}
+	  </div>
+
+	  <div class=\"trades-wrap\">
+	    {trades_table_html}
+	  </div>
 
   <script>
     const form = document.getElementById('ctrl');

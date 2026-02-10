@@ -24,13 +24,36 @@ TF_BUTTONS: List[Tuple[str, str]] = [
 ]
 
 
-def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float]]) -> str:
+def _sma(series: pd.Series, n: int) -> pd.Series:
+    """Simple moving average with NaNs until enough data is available."""
+    if n <= 0:
+        return pd.Series([pd.NA] * len(series), index=series.index, dtype="float64")
+    return series.rolling(window=n, min_periods=n).mean()
+
+
+def _build_plot_html(
+    bars: Sequence[Tuple[int, float, float, float, float, float]],
+    *,
+    fast_n: int = 20,
+    slow_n: int = 50,
+) -> str:
     """Return Plotly HTML fragment (no outer <html> tag)."""
     if not bars:
         return '<div style="padding:12px;font-size:14px;">No bars yet for this symbol/tf.</div>'
 
     df = pd.DataFrame(bars, columns=["ts", "o", "h", "l", "c", "v"])
     df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+
+    # Indicators
+    df["fast"] = _sma(df["c"], fast_n)
+    df["slow"] = _sma(df["c"], slow_n)
+
+    # Crosses (only where both MAs exist)
+    prev_fast = df["fast"].shift(1)
+    prev_slow = df["slow"].shift(1)
+    ok = df["fast"].notna() & df["slow"].notna() & prev_fast.notna() & prev_slow.notna()
+    cross_up = ok & (prev_fast <= prev_slow) & (df["fast"] > df["slow"])
+    cross_dn = ok & (prev_fast >= prev_slow) & (df["fast"] < df["slow"])
 
     fig = go.Figure(
         data=[
@@ -40,10 +63,44 @@ def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float
                 high=df["h"],
                 low=df["l"],
                 close=df["c"],
+                name="OHLC",
             )
         ]
     )
-    fig.update_layout(height=650, xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=20, b=20))
+
+    # Overlay moving averages
+    fig.add_trace(go.Scatter(x=df["dt"], y=df["fast"], mode="lines", name=f"SMA{fast_n}"))
+    fig.add_trace(go.Scatter(x=df["dt"], y=df["slow"], mode="lines", name=f"SMA{slow_n}"))
+
+    # Mark crosses
+    if cross_up.any():
+        fig.add_trace(
+            go.Scatter(
+                x=df.loc[cross_up, "dt"],
+                y=df.loc[cross_up, "c"],
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=10),
+                name="Cross Up",
+            )
+        )
+    if cross_dn.any():
+        fig.add_trace(
+            go.Scatter(
+                x=df.loc[cross_dn, "dt"],
+                y=df.loc[cross_dn, "c"],
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=10),
+                name="Cross Down",
+            )
+        )
+
+    fig.update_layout(
+        height=650,
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=20, r=20, t=20, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
     # full_html=False so we can wrap with our own UI
     return fig.to_html(include_plotlyjs="cdn", full_html=False)
 

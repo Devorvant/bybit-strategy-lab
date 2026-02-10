@@ -5,6 +5,9 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from app.backtest.sma_backtest import backtest_sma_cross
 
 
 # Common timeframe buttons (Bybit intervals)
@@ -24,19 +27,7 @@ TF_BUTTONS: List[Tuple[str, str]] = [
 ]
 
 
-def _sma(series: pd.Series, n: int) -> pd.Series:
-    """Simple moving average with NaNs until enough data is available."""
-    if n <= 0:
-        return pd.Series([pd.NA] * len(series), index=series.index, dtype="float64")
-    return series.rolling(window=n, min_periods=n).mean()
-
-
-def _build_plot_html(
-    bars: Sequence[Tuple[int, float, float, float, float, float]],
-    *,
-    fast_n: int = 20,
-    slow_n: int = 50,
-) -> str:
+def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float]]) -> str:
     """Return Plotly HTML fragment (no outer <html> tag)."""
     if not bars:
         return '<div style="padding:12px;font-size:14px;">No bars yet for this symbol/tf.</div>'
@@ -44,59 +35,158 @@ def _build_plot_html(
     df = pd.DataFrame(bars, columns=["ts", "o", "h", "l", "c", "v"])
     df["dt"] = pd.to_datetime(df["ts"], unit="ms")
 
-    # Indicators
-    df["fast"] = _sma(df["c"], fast_n)
-    df["slow"] = _sma(df["c"], slow_n)
+    # Indicators (keep in sync with strategy defaults)
+    df["sma20"] = df["c"].rolling(20).mean()
+    df["sma50"] = df["c"].rolling(50).mean()
 
-    # Crosses (only where both MAs exist)
-    prev_fast = df["fast"].shift(1)
-    prev_slow = df["slow"].shift(1)
-    ok = df["fast"].notna() & df["slow"].notna() & prev_fast.notna() & prev_slow.notna()
-    cross_up = ok & (prev_fast <= prev_slow) & (df["fast"] > df["slow"])
-    cross_dn = ok & (prev_fast >= prev_slow) & (df["fast"] < df["slow"])
+    cross_up = (df["sma20"].shift(1) <= df["sma50"].shift(1)) & (df["sma20"] > df["sma50"])
+    cross_dn = (df["sma20"].shift(1) >= df["sma50"].shift(1)) & (df["sma20"] < df["sma50"])
 
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=df["dt"],
-                open=df["o"],
-                high=df["h"],
-                low=df["l"],
-                close=df["c"],
-                name="OHLC",
-            )
-        ]
+    # Backtest to draw trades + equity
+    bt = backtest_sma_cross(bars, position_usd=1000.0, fast_n=20, slow_n=50, close_at_end=True)
+    eq_df = pd.DataFrame({"ts": bt.equity_ts, "equity": bt.equity})
+    if not eq_df.empty:
+        eq_df["dt"] = pd.to_datetime(eq_df["ts"], unit="ms")
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.72, 0.28],
     )
 
-    # Overlay moving averages
-    fig.add_trace(go.Scatter(x=df["dt"], y=df["fast"], mode="lines", name=f"SMA{fast_n}"))
-    fig.add_trace(go.Scatter(x=df["dt"], y=df["slow"], mode="lines", name=f"SMA{slow_n}"))
+    # Row 1: price candles + overlays
+    fig.add_trace(
+        go.Candlestick(
+            name="OHLC",
+            x=df["dt"],
+            open=df["o"],
+            high=df["h"],
+            low=df["l"],
+            close=df["c"],
+        ),
+        row=1,
+        col=1,
+    )
 
-    # Mark crosses
-    if cross_up.any():
+    fig.add_trace(
+        go.Scatter(
+            name="SMA20",
+            x=df["dt"],
+            y=df["sma20"],
+            mode="lines",
+            line=dict(width=2),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            name="SMA50",
+            x=df["dt"],
+            y=df["sma50"],
+            mode="lines",
+            line=dict(width=2),
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Cross markers (where the signal would flip)
+    fig.add_trace(
+        go.Scatter(
+            name="Cross Up",
+            x=df.loc[cross_up, "dt"],
+            y=df.loc[cross_up, "c"],
+            mode="markers",
+            marker=dict(symbol="triangle-up", size=10),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            name="Cross Down",
+            x=df.loc[cross_dn, "dt"],
+            y=df.loc[cross_dn, "c"],
+            mode="markers",
+            marker=dict(symbol="triangle-down", size=10),
+        ),
+        row=1,
+        col=1,
+    )
+
+    # Trades from backtest (entry/exit markers)
+    if bt.trades:
+        entry_x, entry_y, entry_text, entry_sym = [], [], [], []
+        exit_x, exit_y, exit_text = [], [], []
+        ts_to_px = {int(t): float(px) for t, px in zip(df["ts"].tolist(), df["c"].tolist())}
+
+        for tr in bt.trades:
+            entry_x.append(pd.to_datetime(tr.entry_ts, unit="ms"))
+            entry_y.append(ts_to_px.get(tr.entry_ts, tr.entry_price))
+            entry_sym.append("triangle-up" if tr.side == "LONG" else "triangle-down")
+            entry_text.append(
+                f"{tr.side} entry<br>px={tr.entry_price:.6g}<br>ts={tr.entry_ts}"
+            )
+
+            exit_x.append(pd.to_datetime(tr.exit_ts, unit="ms"))
+            exit_y.append(ts_to_px.get(tr.exit_ts, tr.exit_price))
+            exit_text.append(
+                f"{tr.side} exit<br>px={tr.exit_price:.6g}<br>pnl={tr.pnl:.2f} USD"
+            )
+
         fig.add_trace(
             go.Scatter(
-                x=df.loc[cross_up, "dt"],
-                y=df.loc[cross_up, "c"],
+                name="Trade Entry",
+                x=entry_x,
+                y=entry_y,
                 mode="markers",
-                marker=dict(symbol="triangle-up", size=10),
-                name="Cross Up",
-            )
+                marker=dict(size=12, symbol=entry_sym),
+                text=entry_text,
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
         )
-    if cross_dn.any():
         fig.add_trace(
             go.Scatter(
-                x=df.loc[cross_dn, "dt"],
-                y=df.loc[cross_dn, "c"],
+                name="Trade Exit",
+                x=exit_x,
+                y=exit_y,
                 mode="markers",
-                marker=dict(symbol="triangle-down", size=10),
-                name="Cross Down",
-            )
+                marker=dict(size=10, symbol="x"),
+                text=exit_text,
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=True,
+            ),
+            row=1,
+            col=1,
         )
 
+    # Row 2: equity curve
+    if not eq_df.empty:
+        fig.add_trace(
+            go.Scatter(
+                name="Equity (USD)",
+                x=eq_df["dt"],
+                y=eq_df["equity"],
+                mode="lines",
+                line=dict(width=2),
+            ),
+            row=2,
+            col=1,
+        )
+        fig.update_yaxes(title_text="Equity", row=2, col=1)
+
+    # Styling
     fig.update_layout(
-        height=650,
+        height=760,
         template="plotly_dark",
+        paper_bgcolor="#0b1220",
+        plot_bgcolor="#0b1220",
         xaxis_rangeslider_visible=False,
         margin=dict(l=20, r=20, t=20, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),

@@ -90,7 +90,12 @@ def signal(symbol: str = Query("APTUSDT"), tf: str = Query(None)):
     return {"symbol": symbol.upper(), "tf": tf, "last_signal": s}
 
 @app.get("/chart", response_class=HTMLResponse)
-def chart(symbol: str = Query("APTUSDT"), tf: str = Query(None), limit: int = Query(5000, ge=10, le=50000)):
+def chart(
+    symbol: str = Query("APTUSDT"),
+    tf: str = Query(None),
+    limit: int = Query(5000, ge=10, le=50000),
+    strategy: str = Query("my_strategy.py"),
+):
     tf = tf or settings.TF
     symbol = symbol.upper()
     rows = load_bars(conn, symbol, tf, limit=limit)
@@ -99,4 +104,12 @@ def chart(symbol: str = Query("APTUSDT"), tf: str = Query(None), limit: int = Qu
     symbols = _db_distinct_symbols()
     tfs = _db_distinct_tfs(symbol)
 
-    return make_chart_html(rows, symbol=symbol, tf=tf, limit=limit, symbols=symbols, tfs=tfs)
+    return make_chart_html(
+        rows,
+        symbol=symbol,
+        tf=tf,
+        limit=limit,
+        symbols=symbols,
+        tfs=tfs,
+        strategy=strategy,
+    )

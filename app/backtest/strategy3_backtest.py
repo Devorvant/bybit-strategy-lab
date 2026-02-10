@@ -333,43 +333,44 @@ def backtest_strategy3(
             last_flip_time = ts[i]
             flips_today += 1
 
-    # Optionally close any open position at the end (useful for pure closed-trade stats)
-    if close_at_end and pos != 0:
-        last_i = len(bars) - 1
-        px = c[last_i]
-        t = ts[last_i]
-        pnl = position_usd * pos * (px - entry_price) / entry_price
-        realized += pnl
-        trades.append(
-            Trade(
-                "LONG" if pos == 1 else "SHORT",
-                entry_ts,
-                entry_price,
-                t,
-                px,
-                pnl,
-                "EOD",
-            )
-        )
-        pos = 0
-        if equity:
-            equity[-1] = realized
-
     open_position: Optional[dict] = None
     if pos != 0:
         last_i = len(bars) - 1
         cur_px = c[last_i]
-        unreal = position_usd * pos * (cur_px - entry_price) / entry_price
-        open_position = {
-            "side": "LONG" if pos == 1 else "SHORT",
-            "entry_ts": entry_ts,
-            "entry_price": entry_price,
-            "current_ts": ts[last_i],
-            "current_price": cur_px,
-            "unrealized_pnl": unreal,
-            "reason": "OPEN",
-        }
-        if equity:
-            equity[-1] = realized + unreal
+
+        if close_at_end:
+            # Force-close the position on the last candle (useful for pure backtests).
+            pnl = position_usd * pos * (cur_px - entry_price) / entry_price
+            realized += pnl
+            cum += pnl
+            trades.append(
+                Trade(
+                    "LONG" if pos == 1 else "SHORT",
+                    entry_ts,
+                    entry_price,
+                    ts[last_i],
+                    cur_px,
+                    pnl,
+                    "END",
+                    cum,
+                )
+            )
+            pos = 0
+            if equity:
+                equity[-1] = realized
+        else:
+            # Keep it as an open position (to match TradingView "open" row).
+            unreal = position_usd * pos * (cur_px - entry_price) / entry_price
+            open_position = {
+                "side": "LONG" if pos == 1 else "SHORT",
+                "entry_ts": entry_ts,
+                "entry_price": entry_price,
+                "current_ts": ts[last_i],
+                "current_price": cur_px,
+                "unrealized_pnl": unreal,
+                "reason": "OPEN",
+            }
+            if equity:
+                equity[-1] = realized + unreal
 
     return BacktestResult(trades, open_position, equity_ts, equity, st_line, st_dir, adx_v, no_trade)

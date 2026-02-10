@@ -129,13 +129,14 @@ async def backfill_on_startup(conn):
     if not settings.BACKFILL_ON_START:
         return
     for sym in settings.SYMBOLS:
-        try:
-            await backfill_symbol_tf(
-                conn,
-                symbol=sym,
-                tf=settings.TF,
-                days=settings.BACKFILL_DAYS,
-                sleep_ms=settings.BACKFILL_SLEEP_MS,
-            )
-        except Exception as e:
-            print(f"[backfill] ERROR {sym} tf={settings.TF}: {e!r}")
+        for tf in settings.TFS:
+            try:
+                await backfill_symbol_tf(
+                    conn,
+                    symbol=sym,
+                    tf=tf,
+                    days=settings.BACKFILL_DAYS,
+                    sleep_ms=settings.BACKFILL_SLEEP_MS,
+                )
+            except Exception as e:
+                print(f"[backfill] ERROR {sym} tf={tf}: {e!r}")

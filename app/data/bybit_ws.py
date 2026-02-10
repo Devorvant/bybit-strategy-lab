@@ -11,12 +11,13 @@ def kline_topic(tf: str, symbol: str) -> str:
 async def ws_collect(conn):
     url = settings.BYBIT_WS_URL
     symbols = [s.strip().upper() for s in settings.SYMBOLS if s.strip()]
-    tf = settings.TF
+    tfs = settings.TFS
 
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                sub_args = [kline_topic(tf, s) for s in symbols]
+                # Subscribe to all configured tfs. This keeps UI switch...
+                sub_args = [kline_topic(tf, s) for s in symbols for tf in tfs]
                 await ws.send(json.dumps({"op": "subscribe", "args": sub_args}))
 
                 while True:

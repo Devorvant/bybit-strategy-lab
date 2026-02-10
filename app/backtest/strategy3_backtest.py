@@ -185,6 +185,7 @@ def backtest_strategy3(
     atr_mult: float = 3.0,
     sl_atr_len: Optional[int] = None,    # backward compat
     sl_atr_mult: Optional[float] = None, # backward compat
+    close_at_end: bool = False,
 ) -> BacktestResult:
     if not bars:
         return BacktestResult([], None, [], [], [], [], [], [])
@@ -331,6 +332,28 @@ def backtest_strategy3(
             entry_price = px
             last_flip_time = ts[i]
             flips_today += 1
+
+    # Optionally close any open position at the end (useful for pure closed-trade stats)
+    if close_at_end and pos != 0:
+        last_i = len(bars) - 1
+        px = c[last_i]
+        t = ts[last_i]
+        pnl = position_usd * pos * (px - entry_price) / entry_price
+        realized += pnl
+        trades.append(
+            Trade(
+                "LONG" if pos == 1 else "SHORT",
+                entry_ts,
+                entry_price,
+                t,
+                px,
+                pnl,
+                "EOD",
+            )
+        )
+        pos = 0
+        if equity:
+            equity[-1] = realized
 
     open_position: Optional[dict] = None
     if pos != 0:

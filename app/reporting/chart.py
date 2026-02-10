@@ -196,105 +196,123 @@ def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float
 
 
 def _build_trades_table_html(bt) -> str:
-    """TradingView-like trades list.
-
-    bt is BacktestResult returned by `backtest_sma_cross`.
     """
-    trades = getattr(bt, "trades", None) or []
-    if not trades:
-        return "<div class=\"trades-empty\">No trades</div>"
+    HTML-таблица сделок, похожая по духу на TradingView:
+    - последние сделки сверху
+    - нумерация по хронологии (максимальный номер = самая свежая)
+    - если есть открытая позиция, она отображается первой строкой (OPEN)
+    """
+    trades = list(getattr(bt, "trades", []) or [])
 
-    # Summary
-    pnls = [float(getattr(t, "pnl", 0.0) or 0.0) for t in trades]
-    total_pnl = sum(pnls)
-    wins = sum(1 for p in pnls if p > 0)
-    win_rate = (wins / len(pnls)) * 100.0 if pnls else 0.0
-    avg_pnl = total_pnl / len(pnls) if pnls else 0.0
+    def dt_str(ts: int) -> str:
+        try:
+            return datetime.utcfromtimestamp(int(ts) / 1000).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return str(ts)
 
-    # Build rows
-    rows = []
+    total_trades = len(trades)
+    wins = sum(1 for t in trades if float(getattr(t, "pnl", 0.0)) > 0)
+    win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
+
+    # cumulative PnL по закрытым сделкам (хронологически)
+    cum_pnl = []
     cum = 0.0
-    for i, t in enumerate(trades, start=1):
-        side = html.escape(str(getattr(t, "side", "")))
-        entry_ts = int(getattr(t, "entry_ts", 0) or 0)
-        exit_ts = int(getattr(t, "exit_ts", 0) or 0)
-        entry_px = float(getattr(t, "entry_price", 0.0) or 0.0)
-        exit_px = float(getattr(t, "exit_price", 0.0) or 0.0)
-        pnl = float(getattr(t, "pnl", 0.0) or 0.0)
-        cum += pnl
+    for tr in trades:
+        cum += float(getattr(tr, "pnl", 0.0))
+        cum_pnl.append(cum)
 
-        entry_dt = pd.to_datetime(entry_ts, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M")
-        exit_dt = pd.to_datetime(exit_ts, unit="ms", utc=True).strftime("%Y-%m-%d %H:%M")
-        dur_s = max(0, (exit_ts - entry_ts) / 1000.0)
-        dur_h = dur_s / 3600.0
+    realized_pnl = cum_pnl[-1] if cum_pnl else 0.0
 
-        pnl_cls = "pnl-pos" if pnl > 0 else ("pnl-neg" if pnl < 0 else "pnl-zero")
+    open_pos = getattr(bt, "open_position", None)
+    open_pnl = float(getattr(open_pos, "unrealized_pnl", 0.0)) if open_pos else 0.0
+    net_pnl = realized_pnl + open_pnl
+    avg_pnl = (realized_pnl / total_trades) if total_trades else 0.0
 
-        rows.append(
-            """
-            <tr>
-              <td class=\"num\">{i}</td>
-              <td class=\"side\">{side}</td>
-              <td>{entry_dt}</td>
-              <td class=\"num\">{entry_px:.6g}</td>
-              <td>{exit_dt}</td>
-              <td class=\"num\">{exit_px:.6g}</td>
-              <td class=\"num {pnl_cls}\">{pnl:.2f}</td>
-              <td class=\"num\">{cum:.2f}</td>
-              <td class=\"num\">{dur_h:.2f}h</td>
-            </tr>
-            """.format(
-                i=i,
-                side=side,
-                entry_dt=entry_dt,
-                entry_px=entry_px,
-                exit_dt=exit_dt,
-                exit_px=exit_px,
-                pnl_cls=pnl_cls,
-                pnl=pnl,
-                cum=cum,
-                dur_h=dur_h,
-            )
-        )
+    def row_html(
+        trade_no: int,
+        trade_type: str,
+        side: str,
+        entry_dt: str,
+        exit_dt: str,
+        entry_px: str,
+        exit_px: str,
+        pnl: float,
+        cum_val: float,
+    ) -> str:
+        pnl_cls = "pnl-pos" if pnl >= 0 else "pnl-neg"
+        cum_cls = "pnl-pos" if cum_val >= 0 else "pnl-neg"
+        return f"""
+        <tr>
+          <td class="num">{trade_no}</td>
+          <td class="type">{html.escape(trade_type)}</td>
+          <td class="side">{html.escape(side)}</td>
+          <td>{html.escape(entry_dt)}</td>
+          <td>{html.escape(exit_dt)}</td>
+          <td class="px">{html.escape(entry_px)}</td>
+          <td class="px">{html.escape(exit_px)}</td>
+          <td class="pnl {pnl_cls}">{pnl:,.2f}</td>
+          <td class="pnl {cum_cls}">{cum_val:,.2f}</td>
+        </tr>
+        """
+
+    rows = []
+
+    # открытая позиция (если есть) — первой строкой
+    if open_pos is not None:
+        trade_no = total_trades + 1
+        side = str(getattr(open_pos, "side", "LONG"))
+        entry_dt = dt_str(getattr(open_pos, "entry_ts", 0))
+        exit_dt = dt_str(getattr(open_pos, "current_ts", getattr(open_pos, "entry_ts", 0))) + " (OPEN)"
+        entry_px = f"{float(getattr(open_pos, 'entry_price', 0.0)):.6g}"
+        exit_px = f"{float(getattr(open_pos, 'current_price', 0.0)):.6g}"
+        rows.append(row_html(trade_no, "OPEN", side, entry_dt, exit_dt, entry_px, exit_px, open_pnl, net_pnl))
+
+    # закрытые сделки: newest-first, но trade_no из хронологии
+    for trade_no, tr in reversed(list(enumerate(trades, start=1))):
+        side = str(getattr(tr, "side", "LONG"))
+        entry_dt = dt_str(getattr(tr, "entry_ts", 0))
+        exit_dt = dt_str(getattr(tr, "exit_ts", 0))
+        entry_px = f"{float(getattr(tr, 'entry_price', 0.0)):.6g}"
+        exit_px = f"{float(getattr(tr, 'exit_price', 0.0)):.6g}"
+        pnl = float(getattr(tr, "pnl", 0.0))
+        cum_val = float(cum_pnl[trade_no - 1]) if cum_pnl else 0.0
+        rows.append(row_html(trade_no, "CLOSED", side, entry_dt, exit_dt, entry_px, exit_px, pnl, cum_val))
 
     rows_html = "\n".join(rows)
 
     return f"""
-<section class=\"trades\">
-  <div class=\"trades-head\">
-    <div class=\"trades-title\">Trades</div>
-    <div class=\"trades-metrics\">
-      <span><b>{len(trades)}</b> trades</span>
-      <span>Win rate <b>{win_rate:.1f}%</b></span>
-      <span>Net PnL <b class=\"{('pnl-pos' if total_pnl>0 else 'pnl-neg' if total_pnl<0 else 'pnl-zero')}\">{total_pnl:.2f}</b></span>
-      <span>Avg <b>{avg_pnl:.2f}</b></span>
+    <div class="trades-wrap">
+      <div class="trades-metrics">
+        <div><b>Total trades:</b> {total_trades}{' (+1 open)' if open_pos is not None else ''}</div>
+        <div><b>Win rate:</b> {win_rate:.1f}%</div>
+        <div><b>Realized PnL:</b> {realized_pnl:,.2f} USD</div>
+        <div><b>Unrealized PnL:</b> {open_pnl:,.2f} USD</div>
+        <div><b>Net PnL:</b> {net_pnl:,.2f} USD</div>
+        <div><b>Avg realized / trade:</b> {avg_pnl:,.2f} USD</div>
+      </div>
+
+      <div class="trades-table">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Type</th>
+              <th>Side</th>
+              <th>Entry time</th>
+              <th>Exit time</th>
+              <th>Entry px</th>
+              <th>Exit px</th>
+              <th>PnL</th>
+              <th>Cum PnL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows_html}
+          </tbody>
+        </table>
+      </div>
     </div>
-  </div>
-
-  <div class=\"table-wrap\">
-    <table class=\"trades-table\">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Side</th>
-          <th>Entry time (UTC)</th>
-          <th class=\"num\">Entry</th>
-          <th>Exit time (UTC)</th>
-          <th class=\"num\">Exit</th>
-          <th class=\"num\">PnL</th>
-          <th class=\"num\">Cum PnL</th>
-          <th class=\"num\">Dur</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows_html}
-      </tbody>
-    </table>
-  </div>
-</section>
-"""
-
-
+    """
 def make_chart_html(
     bars: Sequence[Tuple[int, float, float, float, float, float]],
     *,

@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 
 from app.backtest.sma_backtest import backtest_sma_cross
 from app.backtest.strategy2_backtest import backtest_sma_adx_filter
+from app.backtest.strategy3_backtest import backtest_strategy3
 
 
 # Common timeframe buttons (Bybit intervals)
@@ -49,7 +50,26 @@ def _build_plot_html(
     cross_dn = (df["sma20"].shift(1) >= df["sma50"].shift(1)) & (df["sma20"] < df["sma50"])
 
     # Backtest to draw trades + equity
-    if strategy == "my_strategy2.py":
+    if strategy == "my_strategy3.py":
+        bt = backtest_strategy3(
+            bars,
+            position_usd=1000.0,
+            adx_len=14,
+            adx_smooth=14,
+            adx_no_trade_below=14.0,
+            st_atr_len=14,
+            st_factor=4.0,
+            use_no_trade=True,
+            use_rev_cooldown=True,
+            rev_cooldown_hrs=8,
+            use_flip_limit=False,
+            max_flips_per_day=6,
+            use_emergency_sl=True,
+            atr_len=14,
+            sl_atr_mult=3.0,
+            close_at_end=False,
+        )
+    elif strategy == "my_strategy2.py":
         bt = backtest_sma_adx_filter(
             bars,
             position_usd=1000.0,
@@ -58,10 +78,10 @@ def _build_plot_html(
             adx_n=14,
             adx_enter=20.0,
             adx_exit=15.0,
-            close_at_end=True,
+            close_at_end=False,
         )
     else:
-        bt = backtest_sma_cross(bars, position_usd=1000.0, fast_n=20, slow_n=50, close_at_end=True)
+        bt = backtest_sma_cross(bars, position_usd=1000.0, fast_n=20, slow_n=50, close_at_end=False)
     eq_df = pd.DataFrame({"ts": bt.equity_ts, "equity": bt.equity})
     if not eq_df.empty:
         eq_df["dt"] = pd.to_datetime(eq_df["ts"], unit="ms")
@@ -88,52 +108,95 @@ def _build_plot_html(
         col=1,
     )
 
-    fig.add_trace(
-        go.Scatter(
-            name="SMA20",
-            x=df["dt"],
-            y=df["sma20"],
-            mode="lines",
-            line=dict(width=2),
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            name="SMA50",
-            x=df["dt"],
-            y=df["sma50"],
-            mode="lines",
-            line=dict(width=2),
-        ),
-        row=1,
-        col=1,
-    )
+    if strategy != "my_strategy3.py":
+        # SMA overlays
+        fig.add_trace(
+            go.Scatter(
+                name="SMA20",
+                x=df["dt"],
+                y=df["sma20"],
+                mode="lines",
+                line=dict(width=2),
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                name="SMA50",
+                x=df["dt"],
+                y=df["sma50"],
+                mode="lines",
+                line=dict(width=2),
+            ),
+            row=1,
+            col=1,
+        )
 
-    # Cross markers (where the signal would flip)
-    fig.add_trace(
-        go.Scatter(
-            name="Cross Up",
-            x=df.loc[cross_up, "dt"],
-            y=df.loc[cross_up, "c"],
-            mode="markers",
-            marker=dict(symbol="triangle-up", size=10),
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            name="Cross Down",
-            x=df.loc[cross_dn, "dt"],
-            y=df.loc[cross_dn, "c"],
-            mode="markers",
-            marker=dict(symbol="triangle-down", size=10),
-        ),
-        row=1,
-        col=1,
-    )
+        # Cross markers (where the signal would flip)
+        fig.add_trace(
+            go.Scatter(
+                name="Cross Up",
+                x=df.loc[cross_up, "dt"],
+                y=df.loc[cross_up, "c"],
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=10),
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                name="Cross Down",
+                x=df.loc[cross_dn, "dt"],
+                y=df.loc[cross_dn, "c"],
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=10),
+            ),
+            row=1,
+            col=1,
+        )
+    else:
+        # Strategy3 overlays: Supertrend (up/down segments) + optional NO-TRADE markers
+        up = df["st_dir"] == 1
+        dn = df["st_dir"] == -1
+        fig.add_trace(
+            go.Scatter(
+                name="Supertrend Up",
+                x=df.loc[up, "dt"],
+                y=df.loc[up, "st_line"],
+                mode="lines",
+                line=dict(width=2),
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                name="Supertrend Down",
+                x=df.loc[dn, "dt"],
+                y=df.loc[dn, "st_line"],
+                mode="lines",
+                line=dict(width=2),
+            ),
+            row=1,
+            col=1,
+        )
+
+        if "no_trade" in df.columns:
+            nt = df["no_trade"] == True  # noqa: E712
+            if nt.any():
+                fig.add_trace(
+                    go.Scatter(
+                        name="NO TRADE",
+                        x=df.loc[nt, "dt"],
+                        y=df.loc[nt, "h"],
+                        mode="markers",
+                        marker=dict(symbol="x", size=8),
+                    ),
+                    row=1,
+                    col=1,
+                )
 
     # Trades from backtest (entry/exit markers)
     if bt.trades:
@@ -393,7 +456,7 @@ def make_chart_html(
     if tf not in tfs_list:
         tfs_list = [tf] + [x for x in tfs_list if x != tf]
 
-    available_strategies = ["my_strategy.py", "my_strategy2.py"]
+    available_strategies = ["my_strategy.py", "my_strategy2.py", "my_strategy3.py"]
     if strategy not in available_strategies:
         strategy = "my_strategy.py"
 
@@ -404,6 +467,8 @@ def make_chart_html(
         # close_at_end=False чтобы отображать открытую позицию (если она есть)
         if strategy == "my_strategy2.py":
             bt = backtest_sma_adx_filter(bars, close_at_end=False)
+        elif strategy == "my_strategy3.py":
+            bt = backtest_strategy3(bars, close_at_end=False)
         else:
             bt = backtest_sma_cross(bars, close_at_end=False)
         trades_table_html = _build_trades_table_html(bt)

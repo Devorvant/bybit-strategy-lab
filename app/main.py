@@ -29,14 +29,17 @@ def _db_distinct_symbols() -> List[str]:
         else:
             cur = conn.execute("SELECT DISTINCT symbol FROM bars ORDER BY symbol")
             syms = [r[0] for r in cur.fetchall()]
-        return syms or list(settings.SYMBOLS)
+        base = [s.strip().upper() for s in settings.SYMBOLS if s.strip()]
+        return sorted(set((syms or []) + base))
     except Exception:
-        return list(settings.SYMBOLS)
+        base = [s.strip().upper() for s in settings.SYMBOLS if s.strip()]
+        return sorted(set(base))
 
 
 def _db_distinct_tfs(symbol: str) -> List[str]:
     """Return distinct timeframes present in DB for symbol (fallback to common presets)."""
     presets = ["1", "3", "5", "15", "30", "60", "120", "240", "360", "720", "D", "W", "M"]
+    base = [str(x) for x in settings.TFS] + [str(settings.TF)]
     try:
         if _is_postgres():
             with conn.cursor() as cur:
@@ -52,9 +55,10 @@ def _db_distinct_tfs(symbol: str) -> List[str]:
                 (symbol,),
             )
             tfs = [r[0] for r in cur.fetchall()]
-        return tfs or presets
+        # Union of DB + configured + presets so UI can switch TF even if DB has only one
+        return sorted(set((tfs or []) + base + presets), key=lambda x: (len(x), x))
     except Exception:
-        return presets
+        return sorted(set(base + presets), key=lambda x: (len(x), x))
 
 @app.on_event("startup")
 async def startup():

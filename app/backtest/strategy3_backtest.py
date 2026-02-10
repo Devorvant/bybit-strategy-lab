@@ -181,8 +181,10 @@ def backtest_strategy3(
     use_flip_limit: bool = False,
     max_flips_per_day: int = 6,
     use_emergency_sl: bool = True,
-    sl_atr_len: int = 14,
-    sl_atr_mult: float = 3.0,
+    atr_len: int = 14,
+    atr_mult: float = 3.0,
+    sl_atr_len: Optional[int] = None,    # backward compat
+    sl_atr_mult: Optional[float] = None, # backward compat
 ) -> BacktestResult:
     if not bars:
         return BacktestResult([], None, [], [], [], [], [], [])
@@ -195,7 +197,12 @@ def backtest_strategy3(
 
     st_line, st_dir = supertrend(h, l, c, st_factor, st_atr_len)
     adx_v = adx(h, l, c, adx_len, adx_smooth)
-    atr_v = atr(h, l, c, sl_atr_len)
+    if sl_atr_len is not None:
+        atr_len = sl_atr_len
+    if sl_atr_mult is not None:
+        atr_mult = sl_atr_mult
+
+    atr_v = atr(h, l, c, atr_len)
 
     no_trade: List[bool] = [False] * len(bars)
     for i in range(len(bars)):
@@ -240,7 +247,7 @@ def backtest_strategy3(
         # 1) Emergency stop (intrabar). If triggered, we exit and stay flat for this bar.
         if use_emergency_sl and pos != 0 and atr_v[i] is not None:
             if pos == 1:
-                stop_px = entry_price - atr_v[i] * sl_atr_mult
+                stop_px = entry_price - atr_v[i] * atr_mult
                 if l[i] <= stop_px:
                     pnl = position_usd * pos * (stop_px - entry_price) / entry_price
                     realized += pnl
@@ -253,7 +260,7 @@ def backtest_strategy3(
                     equity[-1] = realized
                     continue
             else:  # pos == -1
-                stop_px = entry_price + atr_v[i] * sl_atr_mult
+                stop_px = entry_price + atr_v[i] * atr_mult
                 if h[i] >= stop_px:
                     pnl = position_usd * pos * (stop_px - entry_price) / entry_price
                     realized += pnl

@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from app.backtest.sma_backtest import backtest_sma_cross
+from app.backtest.strategy2_backtest import backtest_sma_adx_filter
 
 
 # Common timeframe buttons (Bybit intervals)
@@ -28,7 +29,11 @@ TF_BUTTONS: List[Tuple[str, str]] = [
 ]
 
 
-def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float]]) -> str:
+def _build_plot_html(
+    bars: Sequence[Tuple[int, float, float, float, float, float]],
+    *,
+    strategy: str,
+) -> str:
     """Return Plotly HTML fragment (no outer <html> tag)."""
     if not bars:
         return '<div style="padding:12px;font-size:14px;">No bars yet for this symbol/tf.</div>'
@@ -44,7 +49,19 @@ def _build_plot_html(bars: Sequence[Tuple[int, float, float, float, float, float
     cross_dn = (df["sma20"].shift(1) >= df["sma50"].shift(1)) & (df["sma20"] < df["sma50"])
 
     # Backtest to draw trades + equity
-    bt = backtest_sma_cross(bars, position_usd=1000.0, fast_n=20, slow_n=50, close_at_end=True)
+    if strategy == "my_strategy2.py":
+        bt = backtest_sma_adx_filter(
+            bars,
+            position_usd=1000.0,
+            fast_n=20,
+            slow_n=50,
+            adx_n=14,
+            adx_enter=20.0,
+            adx_exit=15.0,
+            close_at_end=True,
+        )
+    else:
+        bt = backtest_sma_cross(bars, position_usd=1000.0, fast_n=20, slow_n=50, close_at_end=True)
     eq_df = pd.DataFrame({"ts": bt.equity_ts, "equity": bt.equity})
     if not eq_df.empty:
         eq_df["dt"] = pd.to_datetime(eq_df["ts"], unit="ms")
@@ -358,6 +375,7 @@ def make_chart_html(
     symbol: str = "APTUSDT",
     tf: str = "120",
     limit: int = 5000,
+    strategy: str = "my_strategy.py",
     symbols: Optional[Iterable[str]] = None,
     tfs: Optional[Iterable[str]] = None,
 ) -> str:
@@ -375,12 +393,19 @@ def make_chart_html(
     if tf not in tfs_list:
         tfs_list = [tf] + [x for x in tfs_list if x != tf]
 
-    plot_html = _build_plot_html(bars)
+    available_strategies = ["my_strategy.py", "my_strategy2.py"]
+    if strategy not in available_strategies:
+        strategy = "my_strategy.py"
+
+    plot_html = _build_plot_html(bars, strategy=strategy)
 
     # Build trades table (TradingView-like)
     try:
         # close_at_end=False чтобы отображать открытую позицию (если она есть)
-        bt = backtest_sma_cross(bars, close_at_end=False)
+        if strategy == "my_strategy2.py":
+            bt = backtest_sma_adx_filter(bars, close_at_end=False)
+        else:
+            bt = backtest_sma_cross(bars, close_at_end=False)
         trades_table_html = _build_trades_table_html(bt)
     except Exception as e:
         trades_table_html = f"<div class=\"trades-empty\">Trades table error: {html.escape(str(e))}</div>"
@@ -388,6 +413,10 @@ def make_chart_html(
     # Build dropdown options
     symbol_options = "\n".join(f'<option value="{html.escape(s)}"></option>' for s in symbols_list)
     tf_options = "\n".join(f'<option value="{html.escape(x)}"></option>' for x in tfs_list)
+    strategy_select_options = "\n".join(
+        f'<option value="{html.escape(s)}" {"selected" if s == strategy else ""}>{html.escape(s)}</option>'
+        for s in available_strategies
+    )
 
     # Build timeframe buttons
     btns = []
@@ -468,6 +497,12 @@ def make_chart_html(
 	      <label>TF
 	        <input name=\"tf\" id=\"tf\" list=\"tfs\" value=\"{html.escape(tf)}\" spellcheck=\"false\" style=\"width:70px\" />
 	        <datalist id=\"tfs\">{tf_options}</datalist>
+	      </label>
+
+	      <label>Strategy
+	        <select name=\"strategy\" id=\"strategy\" style=\"width:170px\">
+	          {strategy_select_options}
+	        </select>
 	      </label>
 
 	      <label>Limit

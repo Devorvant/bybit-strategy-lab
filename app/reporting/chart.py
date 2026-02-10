@@ -74,15 +74,8 @@ def make_chart_html(
     plot_html = _build_plot_html(bars)
 
     # Build dropdown options
-    symbol_options = "\n".join(
-        f'<option value="{html.escape(s)}" {"selected" if s == symbol else ""}>{html.escape(s)}</option>'
-        for s in symbols_list
-    )
-
-    tf_options = "\n".join(
-        f'<option value="{html.escape(x)}" {"selected" if x == tf else ""}>{html.escape(x)}</option>'
-        for x in tfs_list
-    )
+    symbol_options = "\n".join(f'<option value="{html.escape(s)}"></option>' for s in symbols_list)
+    tf_options = "\n".join(f'<option value="{html.escape(x)}"></option>' for x in tfs_list)
 
     # Build timeframe buttons
     btns = []
@@ -133,22 +126,24 @@ def make_chart_html(
   </style>
 </head>
 <body>
-  <div class=\"topbar\">
-    <form id=\"ctrl\" class=\"group\" method=\"get\" action=\"/chart\">
-      <label>Symbol
-        <select name=\"symbol\" id=\"symbol\">{symbol_options}</select>
-      </label>
+	  <div class=\"topbar\">
+	    <form id=\"ctrl\" class=\"group\" method=\"get\" action=\"/chart\" autocomplete=\"off\">
+	      <label>Symbol
+	        <input name=\"symbol\" id=\"symbol\" list=\"symbols\" value=\"{html.escape(symbol)}\" spellcheck=\"false\" />
+	        <datalist id=\"symbols\">{symbol_options}</datalist>
+	      </label>
 
-      <label>TF
-        <select name=\"tf\" id=\"tf\">{tf_options}</select>
-      </label>
+	      <label>TF
+	        <input name=\"tf\" id=\"tf\" list=\"tfs\" value=\"{html.escape(tf)}\" spellcheck=\"false\" style=\"width:70px\" />
+	        <datalist id=\"tfs\">{tf_options}</datalist>
+	      </label>
 
-      <label>Limit
-        <input name=\"limit\" id=\"limit\" type=\"number\" min=\"10\" max=\"50000\" value=\"{int(limit)}\" />
-      </label>
+	      <label>Limit
+	        <input name=\"limit\" id=\"limit\" type=\"number\" min=\"10\" max=\"50000\" value=\"{int(limit)}\" />
+	      </label>
 
-      <button class=\"btn primary\" type=\"submit\">Apply</button>
-    </form>
+	      <button class=\"btn primary\" type=\"submit\">Apply</button>
+	    </form>
 
     <div class=\"group\" style=\"gap:8px;\">
       {tf_buttons_html}
@@ -161,17 +156,25 @@ def make_chart_html(
 
   <script>
     const form = document.getElementById('ctrl');
-    const tfSel = document.getElementById('tf');
-    const symSel = document.getElementById('symbol');
+    const tfInput = document.getElementById('tf');
+    const symInput = document.getElementById('symbol');
 
-    // Submit on dropdown change
-    tfSel.addEventListener('change', () => form.submit());
-    symSel.addEventListener('change', () => form.submit());
+    // Submit on change (after typing/selecting from datalist)
+    tfInput.addEventListener('change', () => form.submit());
+    symInput.addEventListener('change', () => form.submit());
+
+    // Enter submits (nice for manual typing)
+    tfInput.addEventListener('keydown', (e) => {{
+      if (e.key === 'Enter') form.submit();
+    }});
+    symInput.addEventListener('keydown', (e) => {{
+      if (e.key === 'Enter') form.submit();
+    }});
 
     // TF buttons set tf and submit
-    document.querySelectorAll('button[data-tf]').forEach(btn => {{
+    document.querySelectorAll('button[data-tf]').forEach((btn) => {{
       btn.addEventListener('click', () => {{
-        tfSel.value = btn.getAttribute('data-tf');
+        tfInput.value = btn.getAttribute('data-tf');
         form.submit();
       }});
     }});

@@ -3,6 +3,7 @@ from typing import List, Tuple, Optional, Literal
 
 Bar = Tuple[int, float, float, float, float, float]  # (ts,o,h,l,c,v)
 Side = Literal["LONG", "SHORT"]
+ExitReason = Literal["CROSS", "STOP", "EOD"]
 
 def sma(values: List[float], n: int) -> List[Optional[float]]:
     out: List[Optional[float]] = [None] * len(values)
@@ -25,6 +26,7 @@ class Trade:
     exit_ts: int
     exit_price: float
     pnl: float  # USD
+    exit_reason: ExitReason = "CROSS"
 
 @dataclass
 class OpenPosition:
@@ -51,6 +53,7 @@ def backtest_sma_cross(
     fast_n: int = 20,
     slow_n: int = 50,
     close_at_end: bool = True,
+    stop_pct: Optional[float] = None,
 ) -> BacktestResult:
     if not bars:
         return BacktestResult([], [], [], [], [], None)
@@ -92,12 +95,39 @@ def backtest_sma_cross(
         px = close[i]
         t = ts[i]
 
+        # stop-loss (если включен)
+        if stop_pct is not None and stop_pct > 0 and pos != 0:
+            # используем High/Low бара как триггер. Выход фиксируем по close (упрощение).
+            hi = bars[i][2]
+            lo = bars[i][3]
+            stop_hit = False
+            if pos == 1 and lo <= entry_price * (1.0 - stop_pct):
+                stop_hit = True
+            if pos == -1 and hi >= entry_price * (1.0 + stop_pct):
+                stop_hit = True
+
+            if stop_hit:
+                pnl = position_usd * pos * (px - entry_price) / entry_price
+                realized += pnl
+                trades.append(
+                    Trade(
+                        "LONG" if pos == 1 else "SHORT",
+                        entry_ts,
+                        entry_price,
+                        t,
+                        px,
+                        pnl,
+                        exit_reason="STOP",
+                    )
+                )
+                pos = 0
+
         if cross_up:
             # закрыть short
             if pos == -1:
                 pnl = position_usd * pos * (px - entry_price) / entry_price
                 realized += pnl
-                trades.append(Trade("SHORT", entry_ts, entry_price, t, px, pnl))
+                trades.append(Trade("SHORT", entry_ts, entry_price, t, px, pnl, exit_reason="CROSS"))
                 pos = 0
 
             # открыть long
@@ -111,7 +141,7 @@ def backtest_sma_cross(
             if pos == 1:
                 pnl = position_usd * pos * (px - entry_price) / entry_price
                 realized += pnl
-                trades.append(Trade("LONG", entry_ts, entry_price, t, px, pnl))
+                trades.append(Trade("LONG", entry_ts, entry_price, t, px, pnl, exit_reason="CROSS"))
                 pos = 0
 
             # открыть short
@@ -120,9 +150,31 @@ def backtest_sma_cross(
                 entry_ts = t
                 entry_price = px
 
-    # информация об открытой позиции (если не закрываем в конце)
     open_position: Optional[OpenPosition] = None
-    if pos != 0:
+
+    # закрыть позицию в конце (чтобы equity финализировалась)
+    if close_at_end and pos != 0:
+        px = close[-1]
+        t = ts[-1]
+        pnl = position_usd * pos * (px - entry_price) / entry_price
+        realized += pnl
+        trades.append(
+            Trade(
+                "LONG" if pos == 1 else "SHORT",
+                entry_ts,
+                entry_price,
+                t,
+                px,
+                pnl,
+                exit_reason="EOD",
+            )
+        )
+        if equity:
+            equity[-1] = realized
+        pos = 0
+
+    # информация об открытой позиции (если НЕ закрываем в конце)
+    if not close_at_end and pos != 0:
         current_px = close[-1]
         current_t = ts[-1]
         unreal = position_usd * pos * (current_px - entry_price) / entry_price
@@ -135,14 +187,4 @@ def backtest_sma_cross(
             unrealized_pnl=unreal,
         )
 
-    # закрыть позицию в конце (чтобы equity финализировалась)
-    if close_at_end and pos != 0:
-        px = close[-1]
-        t = ts[-1]
-        pnl = position_usd * pos * (px - entry_price) / entry_price
-        realized += pnl
-        trades.append(Trade("LONG" if pos == 1 else "SHORT", entry_ts, entry_price, t, px, pnl))
-        if equity:
-            equity[-1] = realized
-
-        return BacktestResult(trades, equity_ts, equity, fast, slow, open_position)
+    return BacktestResult(trades, equity_ts, equity, fast, slow, open_position)

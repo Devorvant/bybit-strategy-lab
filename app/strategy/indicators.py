@@ -126,18 +126,11 @@ def supertrend(high, low, close, atr_length: int = 10, factor: float = 3.0):
             f_lower[i] = lower[i] if (lower[i] > f_lower[i - 1] or close[i - 1] < f_lower[i - 1]) else f_lower[i - 1]
 
         # direction switch
-        # Match TradingView ta.supertrend logic:
-        # - If we were bearish (-1), flip to bullish (+1) only when
-        #   close crosses ABOVE the *previous* final upper band.
-        # - If we were bullish (+1), flip to bearish (-1) only when
-        #   close crosses BELOW the *previous* final lower band.
         prev_dir = dir_[i - 1]
-        if prev_dir == -1.0 and close[i] > f_upper[i - 1]:
-            dir_[i] = 1.0
-        elif prev_dir == 1.0 and close[i] < f_lower[i - 1]:
-            dir_[i] = -1.0
+        if prev_dir == 1.0:
+            dir_[i] = -1.0 if close[i] < f_lower[i] else 1.0
         else:
-            dir_[i] = prev_dir
+            dir_[i] = 1.0 if close[i] > f_upper[i] else -1.0
 
         st[i] = f_lower[i] if dir_[i] == 1.0 else f_upper[i]
 

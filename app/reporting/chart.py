@@ -69,12 +69,6 @@ def _build_plot_html(
             sl_atr_mult=3.0,
             close_at_end=False,
         )
-        # Attach Supertrend/ADX series (aligned with `bars`) so plotting can
-        # render overlays without KeyError.
-        df["st_line"] = pd.Series(bt.st_line)
-        df["st_dir"] = pd.Series(bt.st_dir)
-        df["adx"] = pd.Series(bt.adx)
-        df["no_trade"] = pd.Series(bt.no_trade)
     elif strategy == "my_strategy2.py":
         bt = backtest_sma_adx_filter(
             bars,

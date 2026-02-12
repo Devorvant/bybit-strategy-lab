@@ -120,16 +120,18 @@ def supertrend(
             final_upper[i] = basic_upper if (basic_upper < prev_fu or prev_close > prev_fu) else prev_fu
             final_lower[i] = basic_lower if (basic_lower > prev_fl or prev_close < prev_fl) else prev_fl
 
-        # direction
+        # direction (TradingView-like):
+        # In uptrend (dir=+1) the stop line is the LOWER band; trend flips to -1 when close crosses BELOW it.
+        # In downtrend (dir=-1) the stop line is the UPPER band; trend flips to +1 when close crosses ABOVE it.
         if i == 0 or st_dir[i - 1] is None:
             st_dir[i] = 1
         else:
             prev_dir = st_dir[i - 1]
             fu = final_upper[i]
             fl = final_lower[i]
-            if prev_dir == 1 and fu is not None and close[i] < fu:
+            if prev_dir == 1 and fl is not None and close[i] < fl:
                 st_dir[i] = -1
-            elif prev_dir == -1 and fl is not None and close[i] > fl:
+            elif prev_dir == -1 and fu is not None and close[i] > fu:
                 st_dir[i] = 1
             else:
                 st_dir[i] = prev_dir

@@ -151,18 +151,19 @@ def supertrend(
             final_upper[i] = basic_upper if (basic_upper < prev_fu or prev_close > prev_fu) else prev_fu
             final_lower[i] = basic_lower if (basic_lower > prev_fl or prev_close < prev_fl) else prev_fl
 
-        # direction (TradingView-like):
-        # In uptrend (dir=+1) the stop line is the LOWER band; trend flips to -1 when close crosses BELOW it.
-        # In downtrend (dir=-1) the stop line is the UPPER band; trend flips to +1 when close crosses ABOVE it.
+        # direction (TradingView ta.supertrend behavior):
+        # TV decides flips using the PREVIOUS finalized bands:
+        #   dir := dir[1] == -1 and close > upperBand[1] ? 1 :
+        #          dir[1] == 1  and close < lowerBand[1] ? -1 : dir[1]
         if i == 0 or st_dir[i - 1] is None:
             st_dir[i] = 1
         else:
             prev_dir = st_dir[i - 1]
-            fu = final_upper[i]
-            fl = final_lower[i]
-            if prev_dir == 1 and fl is not None and close[i] < fl:
+            prev_fu = final_upper[i - 1]
+            prev_fl = final_lower[i - 1]
+            if prev_dir == 1 and prev_fl is not None and close[i] < prev_fl:
                 st_dir[i] = -1
-            elif prev_dir == -1 and fu is not None and close[i] > fu:
+            elif prev_dir == -1 and prev_fu is not None and close[i] > prev_fu:
                 st_dir[i] = 1
             else:
                 st_dir[i] = prev_dir

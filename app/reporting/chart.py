@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from app.backtest.sma_backtest import backtest_sma_cross
+from app.backtest.sma_backtest_tv_like import backtest_sma_cross_tv_like
 from app.backtest.strategy2_backtest import backtest_sma_adx_filter
 from app.backtest.strategy3_backtest import backtest_strategy3
 from app.backtest.strategy3_backtest_tv_like import backtest_strategy3_tv_like
@@ -70,12 +71,11 @@ def _build_plot_html(
             sl_atr_mult=3.0,
             close_at_end=False,
         )
-        # Attach Supertrend/ADX series (aligned with `bars`) so plotting can
-        # render overlays without KeyError.
         df["st_line"] = pd.Series(bt.st_line)
         df["st_dir"] = pd.Series(bt.st_dir)
         df["adx"] = pd.Series(bt.adx)
         df["no_trade"] = pd.Series(bt.no_trade)
+
     elif strategy == "my_strategy3_tv_like.py":
         bt = backtest_strategy3_tv_like(
             bars,
@@ -83,6 +83,7 @@ def _build_plot_html(
             percent_of_equity=50.0,
             commission_percent=0.10,
             slippage_ticks=2,
+            tick_size=0.0001,  # ✅ syminfo.mintick
             use_no_trade=True,
             adx_len=14,
             adx_smooth=14,
@@ -102,6 +103,7 @@ def _build_plot_html(
         df["st_dir"] = pd.Series(bt.st_dir)
         df["adx"] = pd.Series(bt.adx)
         df["no_trade"] = pd.Series(bt.no_trade)
+
     elif strategy == "my_strategy2.py":
         bt = backtest_sma_adx_filter(
             bars,
@@ -113,8 +115,21 @@ def _build_plot_html(
             adx_exit=15.0,
             close_at_end=False,
         )
+
+    elif strategy == "my_strategy_tv_like.py":
+        bt = backtest_sma_cross_tv_like(
+            bars,
+            position_usd=1000.0,
+            fast_n=20,
+            slow_n=50,
+            fee_rate=0.0,
+            slippage_bps=0.0,
+            close_at_end=False,
+        )
+
     else:
         bt = backtest_sma_cross(bars, position_usd=1000.0, fast_n=20, slow_n=50, close_at_end=False)
+
     eq_df = pd.DataFrame({"ts": bt.equity_ts, "equity": bt.equity})
     if not eq_df.empty:
         eq_df["dt"] = pd.to_datetime(eq_df["ts"], unit="ms")
@@ -241,15 +256,11 @@ def _build_plot_html(
             entry_x.append(pd.to_datetime(tr.entry_ts, unit="ms"))
             entry_y.append(ts_to_px.get(tr.entry_ts, tr.entry_price))
             entry_sym.append("triangle-up" if tr.side == "LONG" else "triangle-down")
-            entry_text.append(
-                f"{tr.side} entry<br>px={tr.entry_price:.6g}<br>ts={tr.entry_ts}"
-            )
+            entry_text.append(f"{tr.side} entry<br>px={tr.entry_price:.6g}<br>ts={tr.entry_ts}")
 
             exit_x.append(pd.to_datetime(tr.exit_ts, unit="ms"))
             exit_y.append(ts_to_px.get(tr.exit_ts, tr.exit_price))
-            exit_text.append(
-                f"{tr.side} exit<br>px={tr.exit_price:.6g}<br>pnl={tr.pnl:.2f} USD"
-            )
+            exit_text.append(f"{tr.side} exit<br>px={tr.exit_price:.6g}<br>pnl={tr.pnl:.2f} USD")
 
         fig.add_trace(
             go.Scatter(
@@ -305,24 +316,14 @@ def _build_plot_html(
         margin=dict(l=20, r=20, t=20, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
-    # full_html=False so we can wrap with our own UI
     return fig.to_html(include_plotlyjs="cdn", full_html=False)
 
 
 def _build_trades_table_html(bt) -> str:
-    """
-    HTML-таблица сделок, похожая по духу на TradingView:
-    - последние сделки сверху
-    - нумерация по хронологии (максимальный номер = самая свежая)
-    - если есть открытая позиция, она отображается первой строкой (OPEN)
-    """
+    """TradingView-like trades table, including OPEN position if present."""
     trades = list(getattr(bt, "trades", []) or [])
 
     def dt_str(ts: int) -> str:
-        """Format timestamp to a readable UTC datetime.
-
-        Bybit kline timestamps are in **milliseconds**, but we also tolerate seconds.
-        """
         try:
             ts_int = int(ts)
             secs = (ts_int / 1000.0) if ts_int > 10_000_000_000 else float(ts_int)
@@ -334,17 +335,19 @@ def _build_trades_table_html(bt) -> str:
     wins = sum(1 for t in trades if float(getattr(t, "pnl", 0.0)) > 0)
     win_rate = (wins / total_trades * 100.0) if total_trades else 0.0
 
-    # cumulative PnL по закрытым сделкам (хронологически)
     cum_pnl = []
     cum = 0.0
     for tr in trades:
         cum += float(getattr(tr, "pnl", 0.0))
         cum_pnl.append(cum)
-
     realized_pnl = cum_pnl[-1] if cum_pnl else 0.0
 
     open_pos = getattr(bt, "open_position", None)
-    open_pnl = float(getattr(open_pos, "unrealized_pnl", 0.0)) if open_pos else 0.0
+    if isinstance(open_pos, dict):
+        open_pnl = float(open_pos.get("unrealized_pnl", 0.0))
+    else:
+        open_pnl = float(getattr(open_pos, "unrealized_pnl", 0.0)) if open_pos else 0.0
+
     net_pnl = realized_pnl + open_pnl
     avg_pnl = (realized_pnl / total_trades) if total_trades else 0.0
 
@@ -363,7 +366,7 @@ def _build_trades_table_html(bt) -> str:
         pnl_cls = "pnl-pos" if pnl >= 0 else "pnl-neg"
         cum_cls = "pnl-pos" if cum_val >= 0 else "pnl-neg"
         reason_norm = (reason or "").upper()
-        reason_cls = "reason-stop" if reason_norm == "STOP" else "reason"
+        reason_cls = "reason-stop" if reason_norm.startswith("STOP") else "reason"
         return f"""
         <tr>
           <td class="num">{trade_no}</td>
@@ -381,14 +384,21 @@ def _build_trades_table_html(bt) -> str:
 
     rows = []
 
-    # открытая позиция (если есть) — первой строкой
     if open_pos is not None:
         trade_no = total_trades + 1
-        side = str(getattr(open_pos, "side", "LONG"))
-        entry_dt = dt_str(getattr(open_pos, "entry_ts", 0))
-        exit_dt = dt_str(getattr(open_pos, "current_ts", getattr(open_pos, "entry_ts", 0))) + " (OPEN)"
-        entry_px = f"{float(getattr(open_pos, 'entry_price', 0.0)):.6g}"
-        exit_px = f"{float(getattr(open_pos, 'current_price', 0.0)):.6g}"
+        if isinstance(open_pos, dict):
+            side = str(open_pos.get("side", "LONG"))
+            entry_dt = dt_str(open_pos.get("entry_ts", 0))
+            exit_dt = dt_str(open_pos.get("current_ts", open_pos.get("entry_ts", 0))) + " (OPEN)"
+            entry_px = f"{float(open_pos.get('entry_price', 0.0)):.6g}"
+            exit_px = f"{float(open_pos.get('current_price', 0.0)):.6g}"
+        else:
+            side = str(getattr(open_pos, "side", "LONG"))
+            entry_dt = dt_str(getattr(open_pos, "entry_ts", 0))
+            exit_dt = dt_str(getattr(open_pos, "current_ts", getattr(open_pos, "entry_ts", 0))) + " (OPEN)"
+            entry_px = f"{float(getattr(open_pos, 'entry_price', 0.0)):.6g}"
+            exit_px = f"{float(getattr(open_pos, 'current_price', 0.0)):.6g}"
+
         rows.append(
             row_html(
                 trade_no,
@@ -404,7 +414,6 @@ def _build_trades_table_html(bt) -> str:
             )
         )
 
-    # закрытые сделки: newest-first, но trade_no из хронологии
     for trade_no, tr in reversed(list(enumerate(trades, start=1))):
         side = str(getattr(tr, "side", "LONG"))
         entry_dt = dt_str(getattr(tr, "entry_ts", 0))
@@ -465,6 +474,8 @@ def _build_trades_table_html(bt) -> str:
       </div>
     </div>
     """
+
+
 def make_chart_html(
     bars: Sequence[Tuple[int, float, float, float, float, float]],
     *,
@@ -477,22 +488,17 @@ def make_chart_html(
 ) -> str:
     """Render a simple chart page with controls (symbol/tf/limit)."""
 
-    symbol_e = html.escape(symbol)
     tf_e = html.escape(tf)
 
     symbols_list = [s for s in (symbols or [])] or [symbol]
-    # Ensure current symbol is present
     if symbol not in symbols_list:
         symbols_list = [symbol] + [s for s in symbols_list if s != symbol]
-
-    tfs_list = [x for x in (tfs or [])] or [x[0] for x in TF_BUTTONS]
-    if tf not in tfs_list:
-        tfs_list = [tf] + [x for x in tfs_list if x != tf]
 
     available_strategies = [
         "my_strategy.py",
         "my_strategy2.py",
         "my_strategy3.py",
+        "my_strategy_tv_like.py",
         "my_strategy3_tv_like.py",
     ]
     if strategy not in available_strategies:
@@ -500,13 +506,14 @@ def make_chart_html(
 
     plot_html = _build_plot_html(bars, strategy=strategy)
 
-    # Build trades table (TradingView-like)
+    # Build trades table
     try:
-        # close_at_end=False чтобы отображать открытую позицию (если она есть)
         if strategy == "my_strategy2.py":
             bt = backtest_sma_adx_filter(bars, close_at_end=False)
         elif strategy == "my_strategy3.py":
             bt = backtest_strategy3(bars, close_at_end=False)
+        elif strategy == "my_strategy_tv_like.py":
+            bt = backtest_sma_cross_tv_like(bars, fee_rate=0.0, slippage_bps=0.0, close_at_end=False)
         elif strategy == "my_strategy3_tv_like.py":
             bt = backtest_strategy3_tv_like(
                 bars,
@@ -514,6 +521,7 @@ def make_chart_html(
                 percent_of_equity=50.0,
                 commission_percent=0.10,
                 slippage_ticks=2,
+                tick_size=0.0001,  # ✅ syminfo.mintick
                 use_no_trade=True,
                 adx_len=14,
                 adx_smooth=14,
@@ -533,147 +541,81 @@ def make_chart_html(
             bt = backtest_sma_cross(bars, close_at_end=False)
         trades_table_html = _build_trades_table_html(bt)
     except Exception as e:
-        trades_table_html = f"<div class=\"trades-empty\">Trades table error: {html.escape(str(e))}</div>"
+        trades_table_html = f"<pre style='padding:10px;color:#f88'>Failed to build trades table: {html.escape(str(e))}</pre>"
 
-    # Build dropdown options
-    symbol_options = "\n".join(f'<option value="{html.escape(s)}"></option>' for s in symbols_list)
-    tf_options = "\n".join(f'<option value="{html.escape(x)}"></option>' for x in tfs_list)
-    strategy_select_options = "\n".join(
-        f'<option value="{html.escape(s)}" {"selected" if s == strategy else ""}>{html.escape(s)}</option>'
+    symbol_options = "\n".join(
+        f"<option value='{html.escape(s)}' {'selected' if s == symbol else ''}>{html.escape(s)}</option>"
+        for s in symbols_list
+    )
+
+    tf_buttons = []
+    for tf_val, tf_lbl in TF_BUTTONS:
+        active = "active" if tf_val == tf else ""
+        tf_buttons.append(f"<button class='tf-btn {active}' onclick=\"setTf('{tf_val}')\">{tf_lbl}</button>")
+    tf_buttons_html = "\n".join(tf_buttons)
+
+    strategy_options = "\n".join(
+        f"<option value='{html.escape(s)}' {'selected' if s == strategy else ''}>{html.escape(s)}</option>"
         for s in available_strategies
     )
 
-    # Build timeframe buttons
-    btns = []
-    for tf_val, tf_label in TF_BUTTONS:
-        active = "active" if tf_val == tf else ""
-        btns.append(
-            f'<button type="button" class="btn {active}" data-tf="{html.escape(tf_val)}">{html.escape(tf_label)}</button>'
-        )
-    tf_buttons_html = "\n".join(btns)
-
-    return f"""<!doctype html>
-<html lang=\"en\">
+    return f"""
+<!doctype html>
+<html>
 <head>
-  <meta charset=\"utf-8\"/>
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
-  <title>Chart {symbol_e} tf={tf_e}</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chart</title>
   <style>
-    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #0b1220; color: #e5e7eb; }}
-    .topbar {{
-      position: sticky; top: 0; z-index: 10;
-      background: #0b1220;
-      padding: 10px 12px;
-      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-    }}
-    .group {{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
-    label {{ font-size: 13px; opacity: 0.95; display:flex; gap:6px; align-items:center; }}
-    select, input {{
-      background: #111827; color: #e5e7eb; border: 1px solid rgba(255,255,255,0.12);
-      padding: 6px 8px; border-radius: 10px; outline: none;
-    }}
-    input[type=number] {{ width: 120px; }}
-    .btn {{
-      border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(255,255,255,0.04);
-      color: #e5e7eb;
-      padding: 6px 10px;
-      border-radius: 12px;
-      cursor: pointer;
-      font-size: 13px;
-    }}
-    .btn:hover {{ background: rgba(255,255,255,0.08); }}
-    .btn.active {{ background: #2563eb; border-color: #2563eb; }}
-    .btn.primary {{ background: rgba(37,99,235,0.15); border-color: rgba(37,99,235,0.45); }}
-    .chart-wrap {{ padding: 10px; background: #0b1220; }}
-    .trades-wrap {{ padding: 10px; background: #0b1220; }}
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #0b1220; color: #e6e6e6; }}
+    .topbar {{ padding: 10px 14px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #1b2940; position: sticky; top: 0; background: #0b1220; z-index: 10; }}
+    .topbar label {{ font-size: 13px; opacity: 0.85; }}
+    select, input {{ background: #0e1830; color: #e6e6e6; border: 1px solid #1b2940; border-radius: 8px; padding: 7px 10px; outline: none; }}
+    .tf-row {{ padding: 10px 14px 0 14px; display: flex; gap: 6px; flex-wrap: wrap; }}
+    .tf-btn {{ background: #0e1830; border: 1px solid #1b2940; color: #e6e6e6; padding: 6px 10px; border-radius: 999px; cursor: pointer; font-size: 12px; }}
+    .tf-btn.active {{ background: #1b5cff33; border-color: #2b6dff; }}
+    .apply {{ background: #2b6dff; border: 0; color: #fff; padding: 8px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; }}
+    .wrap {{ padding: 10px 14px 20px 14px; }}
+    .trades-wrap {{ margin-top: 10px; }}
+    .trades-metrics {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; font-size: 13px; margin: 8px 0 12px 0; }}
     .trades-table table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
-    .trades-table th, .trades-table td {{
-      padding: 6px 8px;
-      border: 1px solid rgba(255,255,255,0.14);
-      text-align: left;
-      white-space: nowrap;
-    }}
-    .trades-table th {{ font-weight: 600; color: rgba(255,255,255,0.92); }}
-    .trades-table td {{ color: rgba(255,255,255,0.88); }}
-    .trades-table thead th {{ position: sticky; top: 0; background: #0b1220; z-index: 2; }}
-    .trades-table tbody tr:nth-child(odd) {{ background: rgba(255,255,255,0.02); }}
-    .trades-table tbody tr:hover {{ background: rgba(255,255,255,0.05); }}
-
-    .trades-table td.num {{ text-align: right; width: 40px; }}
-    .trades-table td.dt {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
-    .trades-table td.px {{ text-align: right; }}
-    .pnl-pos {{ color: #7CFC00; }}
-    .pnl-neg {{ color: #FF6B6B; }}
-    .reason-stop {{ color: #FFB86C; font-weight: 700; }}
-    /* Plotly uses white background by default; keep it readable */
-    .plotly-graph-div {{ border-radius: 14px; overflow: hidden; }}
+    .trades-table thead th {{ text-align: left; padding: 8px 6px; border-bottom: 1px solid #1b2940; opacity: 0.9; position: sticky; top: 58px; background: #0b1220; z-index: 5; }}
+    .trades-table tbody td {{ padding: 7px 6px; border-bottom: 1px solid #15243a; white-space: nowrap; }}
+    .num {{ opacity: 0.85; }}
+    .pnl-pos {{ color: #6ee7b7; }}
+    .pnl-neg {{ color: #fb7185; }}
+    .reason-stop {{ color: #fbbf24; }}
+    .reason {{ opacity: 0.9; }}
   </style>
+  <script>
+    function setTf(tf) {{
+      document.getElementById("tf").value = tf;
+      document.getElementById("chartForm").submit();
+    }}
+  </script>
 </head>
 <body>
-	  <div class=\"topbar\">
-	    <form id=\"ctrl\" class=\"group\" method=\"get\" action=\"/chart\" autocomplete=\"off\">
-	      <label>Symbol
-	        <input name=\"symbol\" id=\"symbol\" list=\"symbols\" value=\"{html.escape(symbol)}\" spellcheck=\"false\" />
-	        <datalist id=\"symbols\">{symbol_options}</datalist>
-	      </label>
+  <form id="chartForm" class="topbar" method="get" action="/chart">
+    <label>Symbol</label>
+    <select name="symbol">{symbol_options}</select>
 
-	      <label>TF
-	        <input name=\"tf\" id=\"tf\" list=\"tfs\" value=\"{html.escape(tf)}\" spellcheck=\"false\" style=\"width:70px\" />
-	        <datalist id=\"tfs\">{tf_options}</datalist>
-	      </label>
+    <label>TF</label>
+    <input id="tf" name="tf" value="{tf_e}" style="width:70px"/>
 
-	      <label>Strategy
-	        <select name=\"strategy\" id=\"strategy\" style=\"width:170px\">
-	          {strategy_select_options}
-	        </select>
-	      </label>
+    <label>Strategy</label>
+    <select name="strategy">{strategy_options}</select>
 
-	      <label>Limit
-	        <input name=\"limit\" id=\"limit\" type=\"number\" min=\"10\" max=\"50000\" value=\"{int(limit)}\" />
-	      </label>
+    <label>Limit</label>
+    <input name="limit" value="{int(limit)}" style="width:90px"/>
 
-	      <button class=\"btn primary\" type=\"submit\">Apply</button>
-	    </form>
+    <button class="apply" type="submit">Apply</button>
+  </form>
 
-    <div class=\"group\" style=\"gap:8px;\">
-      {tf_buttons_html}
-    </div>
-  </div>
-
-	  <div class=\"chart-wrap\">
-	    {plot_html}
-	  </div>
-
-	  <div class=\"trades-wrap\">
-	    {trades_table_html}
-	  </div>
-
-  <script>
-    const form = document.getElementById('ctrl');
-    const tfInput = document.getElementById('tf');
-    const symInput = document.getElementById('symbol');
-
-    // Submit on change (after typing/selecting from datalist)
-    tfInput.addEventListener('change', () => form.submit());
-    symInput.addEventListener('change', () => form.submit());
-
-    // Enter submits (nice for manual typing)
-    tfInput.addEventListener('keydown', (e) => {{
-      if (e.key === 'Enter') form.submit();
-    }});
-    symInput.addEventListener('keydown', (e) => {{
-      if (e.key === 'Enter') form.submit();
-    }});
-
-    // TF buttons set tf and submit
-    document.querySelectorAll('button[data-tf]').forEach((btn) => {{
-      btn.addEventListener('click', () => {{
-        tfInput.value = btn.getAttribute('data-tf');
-        form.submit();
-      }});
-    }});
-  </script>
+  <div class="tf-row">{tf_buttons_html}</div>
+  <div class="wrap">{plot_html}{trades_table_html}</div>
 </body>
-</html>"""
+</html>
+"""
+
+
+__all__ = ["make_chart_html"]

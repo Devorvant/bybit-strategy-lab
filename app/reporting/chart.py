@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from app.backtest.sma_backtest import backtest_sma_cross
+from app.backtest.sma_backtest_tv_like import backtest_sma_cross_tv_like
 from app.backtest.strategy2_backtest import backtest_sma_adx_filter
 from app.backtest.strategy3_backtest import backtest_strategy3
 
@@ -84,6 +85,16 @@ def _build_plot_html(
             adx_n=14,
             adx_enter=20.0,
             adx_exit=15.0,
+            close_at_end=False,
+        )
+    elif strategy == "my_strategy_tv_like.py":
+        bt = backtest_sma_cross_tv_like(
+            bars,
+            position_usd=1000.0,
+            fast_n=20,
+            slow_n=50,
+            fee_rate=0.0,
+            slippage_bps=0.0,
             close_at_end=False,
         )
     else:
@@ -462,7 +473,7 @@ def make_chart_html(
     if tf not in tfs_list:
         tfs_list = [tf] + [x for x in tfs_list if x != tf]
 
-    available_strategies = ["my_strategy.py", "my_strategy2.py", "my_strategy3.py"]
+    available_strategies = ["my_strategy.py", "my_strategy_tv_like.py", "my_strategy2.py", "my_strategy3.py"]
     if strategy not in available_strategies:
         strategy = "my_strategy.py"
 
@@ -473,6 +484,8 @@ def make_chart_html(
         # close_at_end=False чтобы отображать открытую позицию (если она есть)
         if strategy == "my_strategy2.py":
             bt = backtest_sma_adx_filter(bars, close_at_end=False)
+        elif strategy == "my_strategy_tv_like.py":
+            bt = backtest_sma_cross_tv_like(bars, close_at_end=False)
         elif strategy == "my_strategy3.py":
             bt = backtest_strategy3(bars, close_at_end=False)
         else:

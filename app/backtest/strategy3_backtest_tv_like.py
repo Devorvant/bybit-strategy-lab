@@ -151,19 +151,18 @@ def supertrend(
             final_upper[i] = basic_upper if (basic_upper < prev_fu or prev_close > prev_fu) else prev_fu
             final_lower[i] = basic_lower if (basic_lower > prev_fl or prev_close < prev_fl) else prev_fl
 
-        # direction (TradingView ta.supertrend behavior):
-        # TV decides flips using the PREVIOUS finalized bands:
-        #   dir := dir[1] == -1 and close > upperBand[1] ? 1 :
-        #          dir[1] == 1  and close < lowerBand[1] ? -1 : dir[1]
+        # direction (TradingView-like):
+        # In uptrend (dir=+1) the stop line is the LOWER band; trend flips to -1 when close crosses BELOW it.
+        # In downtrend (dir=-1) the stop line is the UPPER band; trend flips to +1 when close crosses ABOVE it.
         if i == 0 or st_dir[i - 1] is None:
             st_dir[i] = 1
         else:
             prev_dir = st_dir[i - 1]
-            prev_fu = final_upper[i - 1]
-            prev_fl = final_lower[i - 1]
-            if prev_dir == 1 and prev_fl is not None and close[i] < prev_fl:
+            fu = final_upper[i]
+            fl = final_lower[i]
+            if prev_dir == 1 and fl is not None and close[i] < fl:
                 st_dir[i] = -1
-            elif prev_dir == -1 and prev_fu is not None and close[i] > prev_fu:
+            elif prev_dir == -1 and fu is not None and close[i] > fu:
                 st_dir[i] = 1
             else:
                 st_dir[i] = prev_dir
@@ -295,6 +294,20 @@ def backtest_strategy3_tv_like(
     adx_v = adx(h, l, c, adx_len, adx_smooth)
     atr_v = atr(h, l, c, atr_len)
 
+    # calc_on_order_fills (Pine) means stops exist immediately after an entry fills on bar OPEN.
+    # At that moment, the current bar has just opened (high=low=close=open), so ta.atr() is based
+    # on an 'open-tick' TR, not the final bar range.
+    # We approximate this by building an ATR series on a synthetic OHLC where H=L=C=O for each bar.
+    # This only affects the emergency stop price used for *same-bar* stop checks.
+    tr_open: List[float] = [0.0] * len(c)
+    for i in range(len(c)):
+        if i == 0:
+            tr_open[i] = h[i] - l[i]
+        else:
+            o_i = o[i]
+            tr_open[i] = max(0.0, abs(o_i - c[i - 1]))  # since H=L=C=O at open
+    atr_open_v = _rma(tr_open, atr_len)
+
     no_trade: List[bool] = [False] * len(bars)
     for i in range(len(bars)):
         if not use_no_trade:
@@ -412,14 +425,16 @@ def backtest_strategy3_tv_like(
 
         # 2) Emergency ATR stop (intrabar). Can trigger on the same bar as entry.
         if use_emergency_sl and pos != 0 and atr_v[i] is not None:
+            # Use open-tick ATR for same-bar stop availability (calc_on_order_fills behavior).
+            atr_for_stop = atr_open_v[i] if (atr_open_v[i] is not None) else atr_v[i]
             if pos == 1:
-                stop_px = entry_px - atr_v[i] * atr_mult
+                stop_px = entry_px - atr_for_stop * atr_mult
                 if l[i] <= stop_px:
                     # stop is a SELL
                     fill_px = _slip(stop_px, side=-1, slippage_ticks=slippage_ticks, tick_size=tick_size)
                     close_position(fill_px, ts[i], "STOP_LONG")
             else:
-                stop_px = entry_px + atr_v[i] * atr_mult
+                stop_px = entry_px + atr_for_stop * atr_mult
                 if h[i] >= stop_px:
                     # stop is a BUY
                     fill_px = _slip(stop_px, side=+1, slippage_ticks=slippage_ticks, tick_size=tick_size)

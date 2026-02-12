@@ -35,17 +35,23 @@ Side = Literal["LONG", "SHORT"]
 # -----------------------------------------------------------------------------
 
 def _rma(values: List[float], n: int) -> List[Optional[float]]:
-    """Wilder's RMA (TradingView ta.rma)."""
+    """Wilder's RMA (TradingView ta.rma) with SMA initialization.
+
+    TradingView/Pine initializes rma with the SMA of the first `n` values,
+    producing `na` for the first (n-1) bars.
+    """
     out: List[Optional[float]] = [None] * len(values)
     if n <= 0 or not values:
         return out
-    alpha = 1.0 / n
-    prev: Optional[float] = None
-    for i, v in enumerate(values):
-        if prev is None:
-            prev = v
-        else:
-            prev = prev + alpha * (v - prev)
+    if len(values) < n:
+        return out
+
+    # init with SMA on bar (n-1)
+    sma0 = sum(values[:n]) / n
+    out[n - 1] = sma0
+    prev = sma0
+    for i in range(n, len(values)):
+        prev = (prev * (n - 1) + values[i]) / n
         out[i] = prev
     return out
 

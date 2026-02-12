@@ -14,6 +14,9 @@ app = FastAPI()
 from app.reporting.tv_debug import router as tv_debug_router
 app.include_router(tv_debug_router)
 
+from app.reporting.tv_ingest import router as tv_ingest_router
+app.include_router(tv_ingest_router)
+
 conn = None
 
 

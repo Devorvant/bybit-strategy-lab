@@ -10,6 +10,10 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
+
+from app.reporting.tv_debug import router as tv_debug_router
+app.include_router(tv_debug_router)
+
 conn = None
 
 

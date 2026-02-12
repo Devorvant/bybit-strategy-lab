@@ -9,9 +9,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from app.backtest.sma_backtest import backtest_sma_cross
-from app.backtest.sma_backtest_tv_like import backtest_sma_cross_tv_like
 from app.backtest.strategy2_backtest import backtest_sma_adx_filter
 from app.backtest.strategy3_backtest import backtest_strategy3
+from app.backtest.strategy3_backtest_tv_like import backtest_strategy3_tv_like
 
 
 # Common timeframe buttons (Bybit intervals)
@@ -76,6 +76,32 @@ def _build_plot_html(
         df["st_dir"] = pd.Series(bt.st_dir)
         df["adx"] = pd.Series(bt.adx)
         df["no_trade"] = pd.Series(bt.no_trade)
+    elif strategy == "my_strategy3_tv_like.py":
+        bt = backtest_strategy3_tv_like(
+            bars,
+            initial_capital=10000.0,
+            percent_of_equity=50.0,
+            commission_percent=0.10,
+            slippage_ticks=2,
+            use_no_trade=True,
+            adx_len=14,
+            adx_smooth=14,
+            adx_no_trade_below=14.0,
+            st_atr_len=14,
+            st_factor=4.0,
+            use_rev_cooldown=True,
+            rev_cooldown_hrs=8,
+            use_flip_limit=False,
+            max_flips_per_day=6,
+            use_emergency_sl=True,
+            atr_len=14,
+            atr_mult=3.0,
+            close_at_end=False,
+        )
+        df["st_line"] = pd.Series(bt.st_line)
+        df["st_dir"] = pd.Series(bt.st_dir)
+        df["adx"] = pd.Series(bt.adx)
+        df["no_trade"] = pd.Series(bt.no_trade)
     elif strategy == "my_strategy2.py":
         bt = backtest_sma_adx_filter(
             bars,
@@ -85,16 +111,6 @@ def _build_plot_html(
             adx_n=14,
             adx_enter=20.0,
             adx_exit=15.0,
-            close_at_end=False,
-        )
-    elif strategy == "my_strategy_tv_like.py":
-        bt = backtest_sma_cross_tv_like(
-            bars,
-            position_usd=1000.0,
-            fast_n=20,
-            slow_n=50,
-            fee_rate=0.0,
-            slippage_bps=0.0,
             close_at_end=False,
         )
     else:
@@ -125,7 +141,7 @@ def _build_plot_html(
         col=1,
     )
 
-    if strategy != "my_strategy3.py":
+    if strategy not in ("my_strategy3.py", "my_strategy3_tv_like.py"):
         # SMA overlays
         fig.add_trace(
             go.Scatter(
@@ -473,7 +489,12 @@ def make_chart_html(
     if tf not in tfs_list:
         tfs_list = [tf] + [x for x in tfs_list if x != tf]
 
-    available_strategies = ["my_strategy.py", "my_strategy_tv_like.py", "my_strategy2.py", "my_strategy3.py"]
+    available_strategies = [
+        "my_strategy.py",
+        "my_strategy2.py",
+        "my_strategy3.py",
+        "my_strategy3_tv_like.py",
+    ]
     if strategy not in available_strategies:
         strategy = "my_strategy.py"
 
@@ -484,10 +505,30 @@ def make_chart_html(
         # close_at_end=False чтобы отображать открытую позицию (если она есть)
         if strategy == "my_strategy2.py":
             bt = backtest_sma_adx_filter(bars, close_at_end=False)
-        elif strategy == "my_strategy_tv_like.py":
-            bt = backtest_sma_cross_tv_like(bars, close_at_end=False)
         elif strategy == "my_strategy3.py":
             bt = backtest_strategy3(bars, close_at_end=False)
+        elif strategy == "my_strategy3_tv_like.py":
+            bt = backtest_strategy3_tv_like(
+                bars,
+                initial_capital=10000.0,
+                percent_of_equity=50.0,
+                commission_percent=0.10,
+                slippage_ticks=2,
+                use_no_trade=True,
+                adx_len=14,
+                adx_smooth=14,
+                adx_no_trade_below=14.0,
+                st_atr_len=14,
+                st_factor=4.0,
+                use_rev_cooldown=True,
+                rev_cooldown_hrs=8,
+                use_flip_limit=False,
+                max_flips_per_day=6,
+                use_emergency_sl=True,
+                atr_len=14,
+                atr_mult=3.0,
+                close_at_end=False,
+            )
         else:
             bt = backtest_sma_cross(bars, close_at_end=False)
         trades_table_html = _build_trades_table_html(bt)

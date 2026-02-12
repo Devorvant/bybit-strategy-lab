@@ -298,15 +298,7 @@ def backtest_strategy3_tv_like(
     # At that moment, the current bar has just opened (high=low=close=open), so ta.atr() is based
     # on an 'open-tick' TR, not the final bar range.
     # We approximate this by building an ATR series on a synthetic OHLC where H=L=C=O for each bar.
-    # This only affects the emergency stop price used for *same-bar* stop checks.
-    tr_open: List[float] = [0.0] * len(c)
-    for i in range(len(c)):
-        if i == 0:
-            tr_open[i] = h[i] - l[i]
-        else:
-            o_i = o[i]
-            tr_open[i] = max(0.0, abs(o_i - c[i - 1]))  # since H=L=C=O at open
-    atr_open_v = _rma(tr_open, atr_len)
+
 
     no_trade: List[bool] = [False] * len(bars)
     for i in range(len(bars)):
@@ -325,6 +317,7 @@ def backtest_strategy3_tv_like(
     qty = 0.0  # base units
     entry_ts = 0
     entry_px = 0.0  # fill price
+    entry_bar_i = -1  # bar index where position was opened (for TV-like stop timing)
     entry_fee = 0.0
 
     realized_equity = initial_capital
@@ -346,7 +339,7 @@ def backtest_strategy3_tv_like(
         return realized_equity + qty * pos * (c[i] - entry_px)
 
     def close_position(fill_px: float, fill_ts: int, reason: str) -> None:
-        nonlocal pos, qty, entry_ts, entry_px, entry_fee, realized_equity, cum_pnl
+        nonlocal pos, qty, entry_ts, entry_px, entry_bar_i, entry_fee, realized_equity, cum_pnl
         if pos == 0:
             return
         notional_exit = qty * fill_px
@@ -372,10 +365,11 @@ def backtest_strategy3_tv_like(
         qty = 0.0
         entry_ts = 0
         entry_px = 0.0
+        entry_bar_i = -1
         entry_fee = 0.0
 
-    def open_position(new_pos: int, fill_px: float, fill_ts: int) -> None:
-        nonlocal pos, qty, entry_ts, entry_px, entry_fee, realized_equity
+    def open_position(new_pos: int, fill_px: float, fill_ts: int, bar_i: int) -> None:
+        nonlocal pos, qty, entry_ts, entry_px, entry_bar_i, entry_fee, realized_equity
         if new_pos == 0:
             return
         # Size: percent of current realized equity (TV-like with cash sizing)
@@ -388,6 +382,7 @@ def backtest_strategy3_tv_like(
         pos = new_pos
         entry_ts = fill_ts
         entry_px = fill_px
+        entry_bar_i = bar_i
         entry_fee = fee_ent
 
     # Iterate bars with "open -> intrabar stop -> close (schedule)" structure
@@ -421,26 +416,29 @@ def backtest_strategy3_tv_like(
                 # Open new
                 if pos == 0:
                     fill_px = _slip(o[i], side=+1 if target == 1 else -1, slippage_ticks=slippage_ticks, tick_size=tick_size)
-                    open_position(target, fill_px, ts[i])
+                    open_position(target, fill_px, ts[i], i)
 
-        # 2) Emergency ATR stop (intrabar). Can trigger on the same bar as entry.
+        # 2) Emergency ATR stop (intrabar).
+        # TradingView places/updates strategy.exit on bar close; with process_orders_on_close=false
+        # the earliest realistic stop fill is the bar AFTER entry (not the same entry-open bar).
         if use_emergency_sl and pos != 0 and atr_v[i] is not None:
-            # Use open-tick ATR for same-bar stop availability (calc_on_order_fills behavior).
-            atr_for_stop = atr_open_v[i] if (atr_open_v[i] is not None) else atr_v[i]
-            if pos == 1:
-                stop_px = entry_px - atr_for_stop * atr_mult
-                if l[i] <= stop_px:
-                    # stop is a SELL
-                    fill_px = _slip(stop_px, side=-1, slippage_ticks=slippage_ticks, tick_size=tick_size)
-                    close_position(fill_px, ts[i], "STOP_LONG")
+            if entry_bar_i != -1 and i == entry_bar_i:
+                pass  # do not allow emergency stop on the same bar as entry
             else:
-                stop_px = entry_px + atr_for_stop * atr_mult
-                if h[i] >= stop_px:
-                    # stop is a BUY
-                    fill_px = _slip(stop_px, side=+1, slippage_ticks=slippage_ticks, tick_size=tick_size)
-                    close_position(fill_px, ts[i], "STOP_SHORT")
-
-        # 3) Record equity at bar CLOSE (after any intrabar stops)
+                atr_for_stop = atr_v[i]
+                if pos == 1:
+                    stop_px = entry_px - atr_for_stop * atr_mult
+                    if l[i] <= stop_px:
+                        # stop is a SELL
+                        fill_px = _slip(stop_px, side=-1, slippage_ticks=slippage_ticks, tick_size=tick_size)
+                        close_position(fill_px, ts[i], "STOP_LONG")
+                else:
+                    stop_px = entry_px + atr_for_stop * atr_mult
+                    if h[i] >= stop_px:
+                        # stop is a BUY
+                        fill_px = _slip(stop_px, side=+1, slippage_ticks=slippage_ticks, tick_size=tick_size)
+                        close_position(fill_px, ts[i], "STOP_SHORT")
+# 3) Record equity at bar CLOSE (after any intrabar stops)
         equity_ts.append(ts[i])
         equity.append(m2m(i))
 

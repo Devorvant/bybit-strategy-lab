@@ -594,7 +594,7 @@ def make_chart_html(
     # Optimizer dropdown (per-strategy, optional)
     opt_controls_html = ""
     if opt_strategy and (opt_results is not None) and strategy == "my_strategy3.py":
-        # opt_results rows: (id, created_at, best_score)
+        # opt_results rows: (id, created_at, best_score, best_metrics)
         def _fmt_created(x) -> str:
             try:
                 # datetime
@@ -607,8 +607,36 @@ def make_chart_html(
         opt_opts = [
             f"<option value='' {'selected' if not opt_id else ''}>Current (defaults)</option>"
         ]
-        for rid, created_at, best_score in (opt_results or []):
-            label = f"#{rid} {html.escape(_fmt_created(created_at))}  score={best_score:.4f}" if best_score is not None else f"#{rid} {html.escape(_fmt_created(created_at))}"
+        import json as _json
+
+        def _to_dict(x):
+            if x is None:
+                return {}
+            if isinstance(x, dict):
+                return x
+            if isinstance(x, str):
+                try:
+                    return _json.loads(x)
+                except Exception:
+                    return {}
+            return {}
+
+        for rid, created_at, best_score, best_metrics in (opt_results or []):
+            m = _to_dict(best_metrics)
+            ret = m.get("ret")
+            dd = m.get("dd")
+            trades = m.get("trades")
+
+            parts = [f"#{int(rid)} {html.escape(_fmt_created(created_at))}"]
+            if best_score is not None:
+                parts.append(f"score={float(best_score):.2f}")
+            if isinstance(ret, (int, float)):
+                parts.append(f"ret={ret*100:+.1f}%")
+            if isinstance(dd, (int, float)):
+                parts.append(f"dd={dd*100:.1f}%")
+            if isinstance(trades, (int, float)):
+                parts.append(f"trades={int(trades)}")
+            label = " ".join(parts)
             sel = "selected" if (opt_id is not None and int(opt_id) == int(rid)) else ""
             opt_opts.append(f"<option value='{int(rid)}' {sel}>{label}</option>")
 

@@ -1030,9 +1030,8 @@ def _optimize_run_html(run_id: str) -> str:
     }
 
     best_pre = html.escape(json.dumps(best_obj, ensure_ascii=False, indent=2))
-    logs_pre = html.escape("
-".join(logs))
-    err_html = f"<div class="muted" style="margin-top:8px;color:#ffb4b4">{html.escape(str(err))}</div>" if err else ""
+    logs_pre = html.escape("\n".join(logs))
+    err_html = (f'<div class="muted" style="margin-top:8px;color:#ffb4b4">{html.escape(str(err))}</div>' if err else "")
 
     body = f"""
     {refresh}

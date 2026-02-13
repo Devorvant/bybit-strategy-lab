@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.config import settings
 from app.storage.db import load_bars
@@ -884,8 +884,103 @@ def _optimize_index_html(conn) -> str:
     return _page_shell("Optimizer", body)
 
 
+def _get_run_snapshot_sync(run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a run snapshot in a **sync** context.
+
+    Important: the /optimize/run/<id> page must work even when JavaScript is
+    blocked (CSP / extensions / corporate browser policies). For that we render
+    progress server-side and use a lightweight meta-refresh while the run is
+    active.
+
+    Priority:
+      1) in-memory state (if present in this worker)
+      2) /tmp snapshot (same replica)
+      3) DB snapshot (cross-replica)
+    """
+
+    # 1) in-memory
+    st = RUNS.get(run_id)
+    if st is not None:
+        try:
+            # keep snapshots warm
+            _persist_throttled(st, force=True)
+        except Exception:
+            pass
+        return {
+            "run_id": st.run_id,
+            "status": st.status,
+            "trial": int(st.trials_done),
+            "trials": int(st.cfg.get("trials", 0)) if st.cfg else 0,
+            "elapsed_s": float(max(0.0, (st.finished_at or time.time()) - st.started_at)),
+            "trials_done": int(st.trials_done),
+            "best_score": None if st.best_score == float("-inf") else st.best_score,
+            "best_trial": int(st.best_trial),
+            "best_params": st.best_params,
+            "best_metrics": st.best_metrics,
+            "cfg": st.cfg,
+            "error": st.error,
+            "logs": list(st.logs),
+        }
+
+    # 2) /tmp snapshot (same replica)
+    prog_path = _run_dir(run_id) / "progress.json"
+    if prog_path.exists():
+        try:
+            data = json.loads(prog_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"run_id": run_id, "status": "unknown"}
+        data["logs"] = _tail_lines(_log_path(run_id), n=200)
+        return data
+
+    # 3) DB snapshot (cross replica)
+    try:
+        from app.storage.db import get_conn  # noqa: WPS433
+
+        c = get_conn()
+        try:
+            _ensure_opt_run_state_table(c)
+            d = _load_opt_run_state(c, run_id)
+            if d is not None:
+                return d
+        finally:
+            try:
+                c.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return None
+
+
 def _optimize_run_html(run_id: str) -> str:
     run_id_safe = html.escape(run_id)
+    snap = _get_run_snapshot_sync(run_id)
+    status = (snap or {}).get("status") or "unknown"
+
+    status_line = "loading..." if snap is None else (
+        f"status={status}  trial={(snap.get('trial') or 0)}/{(snap.get('trials') or 0)}  elapsed={snap.get('elapsed_s') or 0}s"
+    )
+    best_obj = None
+    if snap is not None and snap.get("best_score") is not None:
+        best_obj = {
+            "best_score": snap.get("best_score"),
+            "best_trial": snap.get("best_trial"),
+            "best_params": snap.get("best_params"),
+            "best_metrics": snap.get("best_metrics"),
+        }
+    best_txt = "—" if best_obj is None else json.dumps(best_obj, ensure_ascii=False, indent=2)
+    log_lines = (snap or {}).get("logs") or []
+    if isinstance(log_lines, str):
+        log_txt = log_lines
+    else:
+        log_txt = "\n".join([str(x) for x in log_lines])
+
+    # Auto-refresh while active (no JS required)
+    refresh_meta = ""
+    if status not in ("done", "error"):
+        refresh_meta = "<meta http-equiv='refresh' content='1'/>"
+
     body_tpl = """
     <div class="header">
       <div>
@@ -907,79 +1002,28 @@ def _optimize_run_html(run_id: str) -> str:
       </div>
       <div style="height:8px"></div>
 
-      <div class="muted" id="status">loading...</div>
+      <div class="muted" id="status">__STATUS__</div>
     </div>
 
     <div class="card">
       <h2>Best</h2>
-      <pre id="best">—</pre>
+      <pre id="best">__BEST__</pre>
     </div>
 
     <div class="card">
       <h2>Progress log</h2>
-      <pre id="log">loading...</pre>
+      <pre id="log">__LOG__</pre>
     </div>
-
-    <!-- Use an external script so the page works even when inline scripts are blocked by CSP -->
-    <script defer src="/optimize/run.js?run_id=__RUN_ID__&v=__RUN_ID__"></script>
     """
     body = body_tpl.replace("__RUN_ID__", run_id_safe)
-    return _page_shell("Optimizer run", body)
-
-
-def _optimize_run_js(run_id: str) -> str:
-    """Client-side logic for /optimize/run/<id>.
-
-    Served as an external JS file to avoid CSP issues with inline scripts.
-    """
-
-    # Keep the script small and dependency-free.
-    return f"""
-(function() {{
-  const runId = {json.dumps(run_id)};
-  const elStatus = document.getElementById('status');
-  const elBest = document.getElementById('best');
-  const elLog = document.getElementById('log');
-
-  function setText(el, txt) {{ if (el) el.textContent = txt; }}
-
-  async function tick() {{
-    try {{
-      const url = `/api/optimize/status?run_id=${{encodeURIComponent(runId)}}&_=${{Date.now()}}`;
-      const r = await fetch(url, {{ cache: 'no-store' }});
-      const j = await r.json();
-
-      const trial = (j.trial ?? j.trials_done ?? 0);
-      const trials = (j.trials ?? 0);
-      const elapsed = (j.elapsed_s ?? 0);
-      setText(elStatus, `status=${{j.status}}  trial=${{trial}}/${{trials}}  elapsed=${{elapsed.toFixed ? elapsed.toFixed(1) : elapsed}}s`);
-
-      if (j.best_score !== null && j.best_score !== undefined) {{
-        const bestObj = {{
-          best_score: j.best_score,
-          best_trial: j.best_trial,
-          best_params: j.best_params,
-          best_metrics: j.best_metrics,
-        }};
-        setText(elBest, JSON.stringify(bestObj, null, 2));
-      }}
-
-      const logs = Array.isArray(j.logs) ? j.logs : [];
-      setText(elLog, logs.join('\n'));
-
-      if (j.status === 'done' || j.status === 'error') {{
-        if (window.__optTimer) clearInterval(window.__optTimer);
-        window.__optTimer = null;
-      }}
-    }} catch (e) {{
-      setText(elStatus, 'error: ' + (e && e.message ? e.message : String(e)));
-    }}
-  }}
-
-  tick();
-  window.__optTimer = setInterval(tick, 1000);
-}})();
-"""
+    body = body.replace("__STATUS__", html.escape(str(status_line)))
+    body = body.replace("__BEST__", html.escape(best_txt))
+    body = body.replace("__LOG__", html.escape(log_txt or ""))
+    # inject optional meta refresh right after <head> to avoid changing page shell structure
+    page = _page_shell("Optimizer run", body)
+    if refresh_meta:
+        page = page.replace("<head>", f"<head>\n  {refresh_meta}")
+    return page
 
 
 # ------------------------------
@@ -997,23 +1041,6 @@ def optimize_index():
 @router.get("/optimize/run/{run_id}", response_class=HTMLResponse)
 def optimize_run(run_id: str):
     return _optimize_run_html(run_id)
-
-
-@router.get("/optimize/run.js")
-def optimize_run_js(run_id: str = Query(...)):
-    """External JS for the run page.
-
-    Many hosting setups (or user browser extensions) block inline scripts via
-    Content-Security-Policy, which would leave the page stuck on "loading...".
-    Serving JS from the same origin avoids that.
-    """
-
-    js = _optimize_run_js(run_id)
-    return Response(
-        content=js,
-        media_type="application/javascript; charset=utf-8",
-        headers={"Cache-Control": "no-store"},
-    )
 
 
 @router.post("/api/optimize/start")

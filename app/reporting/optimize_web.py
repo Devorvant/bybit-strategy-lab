@@ -663,7 +663,7 @@ def _optimize_index_html(conn) -> str:
           alert(j.detail || 'Failed');
           return;
         }}
-        window.location.href = `/optimize/run/${{j.run_id}}`;
+        window.location.href = '/optimize/run/' + j.run_id;
       }});
     </script>
     """
@@ -711,12 +711,12 @@ def _optimize_run_html(run_id: str) -> str:
           setTimeout(tick, 1000);
           return;
         }}
-        document.getElementById('statusLine').innerText = `status=${{j.status}} trials_done=${{j.trials_done}} best_score=${{j.best_score ?? ''}}`;
+        document.getElementById('statusLine').innerText = 'status=' + j.status + ' trials_done=' + j.trials_done + ' best_score=' + (j.best_score ?? '');
         const best = {{
           best_score: j.best_score,
           best_trial: j.best_trial,
           best_params: j.best_params,
-          best_metrics: j.best_metricss,
+          best_metrics: j.best_metrics,
           cfg: j.cfg,
           error: j.error
         }};

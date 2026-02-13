@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import math
+
 from typing import List, Tuple, Optional, Literal
 
 
@@ -77,9 +79,6 @@ def adx(
             dx[i] = 0.0
             continue
         trv = tr_rma[i] or 0.0
-        if trv == 0.0:
-            dx[i] = 0.0
-            continue
         pdi = 100.0 * (plus_rma[i] or 0.0) / trv
         mdi = 100.0 * (minus_rma[i] or 0.0) / trv
         denom = pdi + mdi

@@ -481,60 +481,113 @@ def _equity_metrics(pnl_curve: List[float], base: float) -> Dict[str, float]:
 
     Strategy3 backtest returns equity as cumulative PnL in USD (starts near 0).
     For meaningful returns/DD we convert to *total equity* = base + pnl.
-    """
 
+    Returns:
+      - ret: total return over the period (fraction, e.g. 0.25 = +25%)
+      - dd: max drawdown (fraction, positive, e.g. 0.2 = 20%)
+      - vol: volatility of log returns per bar
+      - sharpe: sharpe of log returns per bar (scaled by sqrt(N))
+      - time_in_dd: fraction of bars spent below prior peak (0..1)
+      - ulcer: ulcer index on drawdowns (RMS drawdown fraction, 0..)
+    """
     if base <= 0:
         base = 1.0
 
     if not pnl_curve or len(pnl_curve) < 2:
-        return {"ret": 0.0, "dd": 0.0, "vol": 0.0, "sharpe": 0.0}
+        return {"ret": 0.0, "dd": 0.0, "vol": 0.0, "sharpe": 0.0, "time_in_dd": 0.0, "ulcer": 0.0}
 
     equity = [base + float(x) for x in pnl_curve]
     ret = (equity[-1] / base) - 1.0
 
     peak = equity[0]
-    max_dd = 0.0
+    max_dd = 0.0  # negative
+    dd_sq_sum = 0.0
+    dd_n = 0
+    bars_in_dd = 0
+
     for v in equity:
         if v > peak:
             peak = v
         if peak <= 0:
             continue
-        dd = (v / peak) - 1.0
+        dd = (v / peak) - 1.0  # 0 at peak, negative in drawdown
+        if dd < 0:
+            bars_in_dd += 1
+            dd_frac = -dd  # positive drawdown fraction
+            dd_sq_sum += dd_frac * dd_frac
+            dd_n += 1
         if dd < max_dd:
             max_dd = dd
+
     dd_abs = abs(max_dd)
+    time_in_dd = bars_in_dd / max(1, len(equity))
+    ulcer = math.sqrt(dd_sq_sum / dd_n) if dd_n else 0.0
 
-    import math
-
+    # returns series
     rs: List[float] = []
     for i in range(1, len(equity)):
-        if equity[i - 1] > 0 and equity[i] > 0:
-            rs.append(equity[i] / equity[i - 1])
+        prev = equity[i - 1]
+        cur = equity[i]
+        if prev > 0 and cur > 0:
+            rs.append(cur / prev)
 
     if len(rs) < 2:
-        return {"ret": float(ret), "dd": float(dd_abs), "vol": 0.0, "sharpe": 0.0}
+        return {
+            "ret": float(ret),
+            "dd": float(dd_abs),
+            "vol": 0.0,
+            "sharpe": 0.0,
+            "time_in_dd": float(time_in_dd),
+            "ulcer": float(ulcer),
+        }
 
     log_r = [math.log(x) for x in rs if x > 0]
     if len(log_r) < 2:
-        return {"ret": float(ret), "dd": float(dd_abs), "vol": 0.0, "sharpe": 0.0}
+        return {
+            "ret": float(ret),
+            "dd": float(dd_abs),
+            "vol": 0.0,
+            "sharpe": 0.0,
+            "time_in_dd": float(time_in_dd),
+            "ulcer": float(ulcer),
+        }
 
     mean_r = sum(log_r) / len(log_r)
     var = sum((x - mean_r) ** 2 for x in log_r) / (len(log_r) - 1)
     vol = math.sqrt(var) if var > 0 else 0.0
     sharpe = 0.0 if vol == 0 else (mean_r / vol) * math.sqrt(len(log_r))
-    return {"ret": float(ret), "dd": float(dd_abs), "vol": float(vol), "sharpe": float(sharpe)}
 
+    return {
+        "ret": float(ret),
+        "dd": float(dd_abs),
+        "vol": float(vol),
+        "sharpe": float(sharpe),
+        "time_in_dd": float(time_in_dd),
+        "ulcer": float(ulcer),
+    }
 
 def _score(m: Dict[str, float], trades: int, weights: Dict[str, float], min_trades: int) -> float:
+    """Composite objective to maximize.
+
+    Goal: smooth, consistently rising equity — not just a positive tail.
+    We therefore penalize drawdown *and* time spent in drawdown, plus ulcer index.
+    """
     s = 0.0
-    s += weights.get("w_ret", 2.0) * m["ret"]
-    s += weights.get("w_sharpe", 0.5) * m["sharpe"]
-    s -= weights.get("w_dd", 1.5) * m["dd"]
-    s -= weights.get("w_vol", 0.1) * m["vol"]
+    s += weights.get("w_ret", 2.0) * m.get("ret", 0.0)
+    s += weights.get("w_sharpe", 0.5) * m.get("sharpe", 0.0)
+
+    s -= weights.get("w_dd", 1.5) * m.get("dd", 0.0)
+    s -= weights.get("w_vol", 0.1) * m.get("vol", 0.0)
+
+    # Penalize "tail wins": long time below peak and persistent drawdowns
+    s -= weights.get("w_time_dd", 1.0) * m.get("time_in_dd", 0.0)
+    s -= weights.get("w_ulcer", 0.5) * m.get("ulcer", 0.0)
+
+    # Keep existing minimum-trades penalty (user requested not to tune trade count yet)
     if trades < min_trades:
         s -= 0.2 * (min_trades - trades) / max(1, min_trades)
-    return float(s)
 
+    return float(s)
 
 def _train_val_split(bars: List[Tuple[int, float, float, float, float, float]], train_frac: float):
     n = len(bars)
@@ -581,6 +634,8 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
         "w_dd": float(cfg.get("w_dd", 1.5)),
         "w_vol": float(cfg.get("w_vol", 0.1)),
         "w_sharpe": float(cfg.get("w_sharpe", 0.5)),
+        "w_time_dd": float(cfg.get("w_time_dd", 1.0)),
+        "w_ulcer": float(cfg.get("w_ulcer", 0.5)),
     }
 
     rng = random.Random(seed)
@@ -884,103 +939,8 @@ def _optimize_index_html(conn) -> str:
     return _page_shell("Optimizer", body)
 
 
-def _get_run_snapshot_sync(run_id: str) -> Optional[Dict[str, Any]]:
-    """Load a run snapshot in a **sync** context.
-
-    Important: the /optimize/run/<id> page must work even when JavaScript is
-    blocked (CSP / extensions / corporate browser policies). For that we render
-    progress server-side and use a lightweight meta-refresh while the run is
-    active.
-
-    Priority:
-      1) in-memory state (if present in this worker)
-      2) /tmp snapshot (same replica)
-      3) DB snapshot (cross-replica)
-    """
-
-    # 1) in-memory
-    st = RUNS.get(run_id)
-    if st is not None:
-        try:
-            # keep snapshots warm
-            _persist_throttled(st, force=True)
-        except Exception:
-            pass
-        return {
-            "run_id": st.run_id,
-            "status": st.status,
-            "trial": int(st.trials_done),
-            "trials": int(st.cfg.get("trials", 0)) if st.cfg else 0,
-            "elapsed_s": float(max(0.0, (st.finished_at or time.time()) - st.started_at)),
-            "trials_done": int(st.trials_done),
-            "best_score": None if st.best_score == float("-inf") else st.best_score,
-            "best_trial": int(st.best_trial),
-            "best_params": st.best_params,
-            "best_metrics": st.best_metrics,
-            "cfg": st.cfg,
-            "error": st.error,
-            "logs": list(st.logs),
-        }
-
-    # 2) /tmp snapshot (same replica)
-    prog_path = _run_dir(run_id) / "progress.json"
-    if prog_path.exists():
-        try:
-            data = json.loads(prog_path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"run_id": run_id, "status": "unknown"}
-        data["logs"] = _tail_lines(_log_path(run_id), n=200)
-        return data
-
-    # 3) DB snapshot (cross replica)
-    try:
-        from app.storage.db import get_conn  # noqa: WPS433
-
-        c = get_conn()
-        try:
-            _ensure_opt_run_state_table(c)
-            d = _load_opt_run_state(c, run_id)
-            if d is not None:
-                return d
-        finally:
-            try:
-                c.close()
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    return None
-
-
 def _optimize_run_html(run_id: str) -> str:
     run_id_safe = html.escape(run_id)
-    snap = _get_run_snapshot_sync(run_id)
-    status = (snap or {}).get("status") or "unknown"
-
-    status_line = "loading..." if snap is None else (
-        f"status={status}  trial={(snap.get('trial') or 0)}/{(snap.get('trials') or 0)}  elapsed={snap.get('elapsed_s') or 0}s"
-    )
-    best_obj = None
-    if snap is not None and snap.get("best_score") is not None:
-        best_obj = {
-            "best_score": snap.get("best_score"),
-            "best_trial": snap.get("best_trial"),
-            "best_params": snap.get("best_params"),
-            "best_metrics": snap.get("best_metrics"),
-        }
-    best_txt = "—" if best_obj is None else json.dumps(best_obj, ensure_ascii=False, indent=2)
-    log_lines = (snap or {}).get("logs") or []
-    if isinstance(log_lines, str):
-        log_txt = log_lines
-    else:
-        log_txt = "\n".join([str(x) for x in log_lines])
-
-    # Auto-refresh while active (no JS required)
-    refresh_meta = ""
-    if status not in ("done", "error"):
-        refresh_meta = "<meta http-equiv='refresh' content='1'/>"
-
     body_tpl = """
     <div class="header">
       <div>
@@ -1002,28 +962,47 @@ def _optimize_run_html(run_id: str) -> str:
       </div>
       <div style="height:8px"></div>
 
-      <div class="muted" id="status">__STATUS__</div>
+      <div class="muted" id="status">loading...</div>
     </div>
 
     <div class="card">
       <h2>Best</h2>
-      <pre id="best">__BEST__</pre>
+      <pre id="best">—</pre>
     </div>
 
     <div class="card">
       <h2>Progress log</h2>
-      <pre id="log">__LOG__</pre>
+      <pre id="log">loading...</pre>
     </div>
+
+    <script>
+      const runId = "__RUN_ID__";
+      const elStatus = document.getElementById('status');
+      const elBest = document.getElementById('best');
+      const elLog = document.getElementById('log');
+
+      async function tick() {
+        try {
+          const r = await fetch(`/api/optimize/status?run_id=${encodeURIComponent(runId)}`);
+          const j = await r.json();
+          elStatus.textContent = `status=${j.status}  trial=${j.trial || 0}/${j.trials || 0}  elapsed=${j.elapsed_s || 0}s`;
+          if (j.best_score !== null && j.best_score !== undefined) {
+            elBest.textContent = JSON.stringify({best_score: j.best_score, best_params: j.best_params, best_metrics: j.best_metrics}, null, 2);
+          }
+          elLog.textContent = (j.logs || []).join('\n');
+          if (j.status === 'done' || j.status === 'error') {
+            clearInterval(timer);
+          }
+        } catch (e) {
+          elStatus.textContent = 'error: ' + (e && e.message ? e.message : e);
+        }
+      }
+      tick();
+      const timer = setInterval(tick, 1000);
+    </script>
     """
     body = body_tpl.replace("__RUN_ID__", run_id_safe)
-    body = body.replace("__STATUS__", html.escape(str(status_line)))
-    body = body.replace("__BEST__", html.escape(best_txt))
-    body = body.replace("__LOG__", html.escape(log_txt or ""))
-    # inject optional meta refresh right after <head> to avoid changing page shell structure
-    page = _page_shell("Optimizer run", body)
-    if refresh_meta:
-        page = page.replace("<head>", f"<head>\n  {refresh_meta}")
-    return page
+    return _page_shell("Optimizer run", body)
 
 
 # ------------------------------
@@ -1086,6 +1065,8 @@ async def optimize_start(payload: Dict[str, Any]):
         "w_dd": 1.5,
         "w_vol": 0.1,
         "w_sharpe": 0.5,
+        "w_time_dd": 1.0,
+        "w_ulcer": 0.5,
     }
 
     state = RunState(run_id=run_id, cfg=cfg)

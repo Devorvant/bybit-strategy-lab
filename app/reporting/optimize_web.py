@@ -119,12 +119,14 @@ def persist_log(run_id: str, msg: str) -> None:
         _append_line(_run_dir(run_id) / "log.txt", msg)
 
 def _add_log(st: RunState, msg: str) -> None:
-    _add_log(st, msg)
-    if len(st.logs) > 300:
-        del st.logs[:-300]
+    # Keep an in-memory rolling log and also persist a text file under /tmp
+    ts = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    line = f"{ts} {msg}"
+    st.logs.append(line)
     try:
-        persist_log(st.run_id, msg)
+        _append_line(_log_path(st.run_id), line)
     except Exception:
+        # never fail the optimizer because of logging
         pass
 
 def _persist_throttled(st: RunState, *, force: bool = False) -> None:
@@ -339,10 +341,15 @@ def _equity_metrics(equity: List[float]) -> Dict[str, float]:
     import math
 
     log_r = [math.log(x) for x in rs]
-    mean_r = sum(log_r) / len(log_r)
-    var = sum((x - mean_r) ** 2 for x in log_r) / (len(log_r) - 1)
-    vol = math.sqrt(var)
-    sharpe = 0.0 if vol == 0 else (mean_r / vol) * math.sqrt(len(log_r))
+    # Need at least 2 return observations to compute sample stdev
+    if len(log_r) < 2:
+        vol = 0.0
+        sharpe = 0.0
+    else:
+        mean_r = sum(log_r) / len(log_r)
+        var = sum((x - mean_r) ** 2 for x in log_r) / (len(log_r) - 1)
+        vol = math.sqrt(var) if var > 0 else 0.0
+        sharpe = 0.0 if vol == 0 else (mean_r / vol) * math.sqrt(len(log_r))
     return {"ret": ret, "dd": dd_abs, "vol": vol, "sharpe": sharpe}
 
 
@@ -668,63 +675,68 @@ def _optimize_index_html(conn) -> str:
 
 
 def _optimize_run_html(run_id: str) -> str:
-    body = f"""
-    <div class='card'>
-      <div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>
-        <div>
-          <div><b>run_id:</b> <span class='pill'>{html.escape(run_id)}</span></div>
-          <div class='muted' id='statusLine' style='margin-top:6px;'>loading...</div>
-        </div>
-        <div>
-          <a href='/optimize'>← back</a>
-        </div>
+    run_id_safe = html.escape(run_id)
+    body_tpl = """
+    <div class="header">
+      <div>
+        <h1>Optimizer run</h1>
+        <div class="muted">Оптимизация Strategy 3 (2h). Итерации показываем в вебе, в Postgres сохраняем только итог.</div>
+      </div>
+      <div class="row">
+        <a class="btn" href="/chart">Chart</a>
       </div>
     </div>
 
-    <div class='card'>
-      <div style='font-weight:700;margin-bottom:8px;'>Best</div>
-      <div id='bestBox' class='muted'>—</div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between;">
+        <div>
+          <div class="muted">run_id:</div>
+          <div><span class="pill">__RUN_ID__</span></div>
+        </div>
+        <div><a class="btn" href="/optimize">← back</a></div>
+      </div>
+      <div style="height:8px"></div>
+
+      <div class="muted" id="status">loading...</div>
     </div>
 
-    <div class='card'>
-      <div style='font-weight:700;margin-bottom:8px;'>Progress log</div>
-      <pre id='logBox' class='muted'>loading...</pre>
+    <div class="card">
+      <h2>Best</h2>
+      <pre id="best">—</pre>
+    </div>
+
+    <div class="card">
+      <h2>Progress log</h2>
+      <pre id="log">loading...</pre>
     </div>
 
     <script>
-      async function tick() {{
-        let res;
+      const runId = "__RUN_ID__";
+      const elStatus = document.getElementById('status');
+      const elBest = document.getElementById('best');
+      const elLog = document.getElementById('log');
+
+      async function tick() {
         try {
-          res = await fetch(`/api/optimize/status?run_id={html.escape(run_id)}`);
+          const r = await fetch(`/api/optimize/status?run_id=${encodeURIComponent(runId)}`);
+          const j = await r.json();
+          elStatus.textContent = `status=${j.status}  trial=${j.trial || 0}/${j.trials || 0}  elapsed=${j.elapsed_s || 0}s`;
+          if (j.best_score !== null && j.best_score !== undefined) {
+            elBest.textContent = JSON.stringify({best_score: j.best_score, best_params: j.best_params, best_metrics: j.best_metrics}, null, 2);
+          }
+          elLog.textContent = (j.logs || []).join('\n');
+          if (j.status === 'done' || j.status === 'error') {
+            clearInterval(timer);
+          }
         } catch (e) {
-          document.getElementById('statusLine').innerText = 'fetch error: ' + (e?.message || e);
-          setTimeout(tick, 1000);
-          return;
+          elStatus.textContent = 'error: ' + (e && e.message ? e.message : e);
         }
-        const j = await res.json();
-        if (!res.ok) {{
-          document.getElementById('statusLine').innerText = (j && j.detail) ? j.detail : ('http error ' + res.status);
-          setTimeout(tick, 1000);
-          return;
-        }}
-        document.getElementById('statusLine').innerText = `status=${{j.status}} trials_done=${{j.trials_done}} best_score=${{j.best_score ?? ''}}`;
-        const best = {{
-          best_score: j.best_score,
-          best_trial: j.best_trial,
-          best_params: j.best_params,
-          best_metrics: j.best_metricss,
-          cfg: j.cfg,
-          error: j.error
-        }};
-        document.getElementById('bestBox').innerText = JSON.stringify(best, null, 2);
-        document.getElementById('logBox').innerText = (j.logs || []).join('\n');
-        if (j.status === 'running' || j.status === 'queued') {{
-          setTimeout(tick, 1200);
-        }}
-      }}
+      }
       tick();
+      const timer = setInterval(tick, 1000);
     </script>
     """
+    body = body_tpl.replace("__RUN_ID__", run_id_safe)
     return _page_shell("Optimizer run", body)
 
 

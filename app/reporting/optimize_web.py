@@ -47,6 +47,9 @@ class RunState:
     logs: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=400))
     error: Optional[str] = None
 
+    # DB connection (runtime only; not serialized)
+    conn: Any = field(default=None, repr=False, compare=False)
+
 
 RUNS: Dict[str, RunState] = {}
 
@@ -100,8 +103,12 @@ def _tail_lines(path: Path, n: int = 200, max_bytes: int = 200_000) -> List[str]
     ls = text.splitlines()
     return ls[-n:]
 
-def persist_state(st: RunState) -> None:
-    # Минимальное состояние (без массивов баров и т.п.)
+def persist_state(st: RunState) -> Dict[str, Any]:
+    """Persist current state (best effort) to /tmp and to DB (if available).
+
+    Returns the dict that was persisted.
+    """
+
     d: Dict[str, Any] = {
         "run_id": st.run_id,
         "status": st.status,
@@ -114,9 +121,27 @@ def persist_state(st: RunState) -> None:
         "error": st.error,
         "started_at": st.started_at,
         "updated_at": time.time(),
+        # logs: store small tail so any replica can show progress
+        "logs": list(st.logs),
     }
-    with _lock_for(st.run_id):
-        _atomic_write_json(_run_dir(st.run_id) / "progress.json", d)
+
+    # 1) local file (works across worker processes on the same instance)
+    try:
+        with _lock_for(st.run_id):
+            _atomic_write_json(_run_dir(st.run_id) / "progress.json", d)
+    except Exception:
+        pass
+
+    # 2) DB row (works across replicas)
+    conn = getattr(st, "conn", None)
+    if conn is not None:
+        try:
+            _upsert_opt_run_state(conn, st.run_id, d)
+        except Exception:
+            # Do not crash optimizer because of persistence issues
+            pass
+
+    return d
 
 def persist_log(run_id: str, msg: str) -> None:
     with _lock_for(run_id):
@@ -213,6 +238,97 @@ def _ensure_opt_results_table(conn) -> None:
     else:
         conn.executescript(ddl_sqlite)
         conn.commit()
+
+
+# ------------------------------
+# DB helpers (progress / cross-replica state)
+# ------------------------------
+
+
+def _ensure_opt_run_state_table(conn) -> None:
+    """Table for optimizer *progress* (one row per run_id).
+
+    This is important on Railway when you can have multiple replicas/worker processes: local
+    filesystem in /tmp is not shared across replicas, but Postgres is.
+    """
+
+    ddl_pg = """
+    CREATE TABLE IF NOT EXISTS opt_run_state (
+      run_id TEXT PRIMARY KEY,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      data JSONB
+    );
+    """
+
+    ddl_sqlite = """
+    CREATE TABLE IF NOT EXISTS opt_run_state (
+      run_id TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      data TEXT
+    );
+    """
+
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                for stmt in [st.strip() for st in ddl_pg.split(';') if st.strip()]:
+                    cur.execute(stmt + ';')
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        conn.executescript(ddl_sqlite)
+        conn.commit()
+
+
+def _upsert_opt_run_state(conn, run_id: str, data: Dict[str, Any]) -> None:
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO opt_run_state(run_id, updated_at, data)
+                    VALUES(%s, now(), %s)
+                    ON CONFLICT(run_id) DO UPDATE SET updated_at = now(), data = EXCLUDED.data
+                    """,
+                    (run_id, json.dumps(data, ensure_ascii=False)),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        conn.execute(
+            """
+            INSERT INTO opt_run_state(run_id, updated_at, data)
+            VALUES(?, datetime('now'), ?)
+            ON CONFLICT(run_id) DO UPDATE SET updated_at=datetime('now'), data=excluded.data
+            """,
+            (run_id, json.dumps(data, ensure_ascii=False)),
+        )
+        conn.commit()
+
+
+def _load_opt_run_state(conn, run_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        _ensure_opt_run_state_table(conn)
+    except Exception:
+        return None
+
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute('SELECT data FROM opt_run_state WHERE run_id=%s', (run_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
+    else:
+        cur = conn.execute('SELECT data FROM opt_run_state WHERE run_id=?', (run_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return json.loads(row[0]) if isinstance(row[0], str) else row[0]
 
 
 def _insert_opt_result(
@@ -335,7 +451,11 @@ def _equity_metrics(equity: List[float]) -> Dict[str, float]:
     for v in equity:
         if v > peak:
             peak = v
-        dd = (v / peak) - 1.0
+        # If peak is zero (common if equity starts from 0), avoid division by zero.
+        if peak > 0:
+            dd = (v / peak) - 1.0
+        else:
+            dd = 0.0
         if dd < max_dd:
             max_dd = dd
     dd_abs = abs(max_dd)
@@ -820,6 +940,7 @@ async def optimize_start(payload: Dict[str, Any]):
     }
 
     state = RunState(run_id=run_id, cfg=cfg)
+    state.conn = conn
     persist_state(state)
     async with RUN_LOCK:
         RUNS[run_id] = state
@@ -835,31 +956,64 @@ async def optimize_start(payload: Dict[str, Any]):
 
 @router.get("/api/optimize/status")
 async def optimize_status(run_id: str = Query(...)):
-    # 1) if current worker has it in memory, persist to file (helps other workers)
+    """Return optimizer progress.
+
+    We try, in order:
+      1) in-memory state (same worker)
+      2) /tmp progress.json (same instance)
+      3) Postgres/SQLite table opt_run_state (works across replicas)
+    """
+
+    from app.main import conn  # noqa: WPS433
+
+    # 1) if current worker has it in memory, persist to file+db (helps others)
     async with RUN_LOCK:
         st = RUNS.get(run_id)
     if st is not None:
         _persist_throttled(st, force=True)
 
-    # 2) load from file system (works across multiple worker processes)
-    prog_path = _run_dir(run_id) / "progress.json"
-    if not prog_path.exists():
-        if st is None:
-            return JSONResponse(status_code=404, content={"detail": "run_id not found"})
-        # best-effort fallback
-        return {
-            "run_id": st.run_id,
-            "status": st.status,
-            "trials_done": st.trials_done,
-            "best_score": None if st.best_score == float("-inf") else st.best_score,
-            "best_trial": st.best_trial,
-            "best_params": st.best_params,
-            "best_metrics": st.best_metrics,
-            "cfg": st.cfg,
-            "error": st.error,
-            "logs": list(st.logs),
-        }
+    data: Optional[Dict[str, Any]] = None
 
-    data = json.loads(prog_path.read_text(encoding="utf-8"))
-    data["logs"] = _tail_lines(_run_dir(run_id) / "log.txt", n=200)
-    return data
+    # 2) filesystem
+    prog_path = _run_dir(run_id) / "progress.json"
+    if prog_path.exists():
+        try:
+            data = json.loads(prog_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+
+    # 3) DB row (important when filesystem isn't shared)
+    if data is None:
+        data = _load_opt_run_state(conn, run_id)
+
+    if data is None and st is None:
+        return JSONResponse(status_code=404, content={"detail": "run_id not found"})
+
+    if data is None and st is not None:
+        data = persist_state(st)
+
+    cfg = (data or {}).get("cfg") or {}
+    trials_total = int(cfg.get("trials") or 0)
+    trials_done = int((data or {}).get("trials_done") or 0)
+    started_at = float((data or {}).get("started_at") or time.time())
+    elapsed_s = int(max(0.0, time.time() - started_at))
+
+    # Provide a stable API for the UI
+    out = {
+        "run_id": run_id,
+        "status": (data or {}).get("status") or (st.status if st else "unknown"),
+        "trial": trials_done,
+        "trials": trials_total,
+        "elapsed_s": elapsed_s,
+        "best_score": (data or {}).get("best_score"),
+        "best_params": (data or {}).get("best_params"),
+        "best_metrics": (data or {}).get("best_metrics"),
+        "best_trial": (data or {}).get("best_trial"),
+        "error": (data or {}).get("error"),
+        "logs": (data or {}).get("logs") or [],
+        # Keep the full payload for debugging/compat
+        "cfg": cfg,
+        "trials_done": trials_done,
+        "updated_at": (data or {}).get("updated_at"),
+    }
+    return out

@@ -6,6 +6,9 @@ import html
 import json
 import time
 import uuid
+import os
+from pathlib import Path
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -45,6 +48,99 @@ class RunState:
 
 
 RUNS: Dict[str, RunState] = {}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cross-worker persistence (Railway часто запускает несколько worker-процессов).
+# Храним состояние оптимизации в файловой системе (/tmp), чтобы страница
+# /optimize/run/<id> могла читать прогресс независимо от того, какой worker
+# обслуживает HTTP-запрос.
+# ──────────────────────────────────────────────────────────────────────────────
+RUN_DIR = Path(os.environ.get("OPTIMIZER_RUN_DIR", "/tmp/optimizer_runs"))
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+_FILE_LOCKS: Dict[str, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+def _lock_for(run_id: str) -> threading.Lock:
+    with _FILE_LOCKS_GUARD:
+        lk = _FILE_LOCKS.get(run_id)
+        if lk is None:
+            lk = threading.Lock()
+            _FILE_LOCKS[run_id] = lk
+        return lk
+
+def _run_dir(run_id: str) -> Path:
+    return RUN_DIR / run_id
+
+def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+def _append_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+
+def _tail_lines(path: Path, n: int = 200, max_bytes: int = 200_000) -> List[str]:
+    if not path.exists():
+        return []
+    size = path.stat().st_size
+    read_from = max(0, size - max_bytes)
+    with path.open("rb") as f:
+        f.seek(read_from)
+        data = f.read()
+    text = data.decode("utf-8", errors="replace")
+    ls = text.splitlines()
+    return ls[-n:]
+
+def persist_state(st: RunState) -> None:
+    # Минимальное состояние (без массивов баров и т.п.)
+    d: Dict[str, Any] = {
+        "run_id": st.run_id,
+        "status": st.status,
+        "trials_done": st.trials_done,
+        "best_score": None if st.best_score == float("-inf") else st.best_score,
+        "best_trial": st.best_trial,
+        "best_params": st.best_params,
+        "best_metrics": st.best_metrics,
+        "cfg": st.cfg,
+        "error": st.error,
+        "started_at": st.started_at,
+        "updated_at": time.time(),
+    }
+    with _lock_for(st.run_id):
+        _atomic_write_json(_run_dir(st.run_id) / "progress.json", d)
+
+def persist_log(run_id: str, msg: str) -> None:
+    with _lock_for(run_id):
+        _append_line(_run_dir(run_id) / "log.txt", msg)
+
+def _add_log(st: RunState, msg: str) -> None:
+    """Append a human-readable log line for UI + persist to disk."""
+    st.logs.append(msg)
+    if len(st.logs) > 300:
+        del st.logs[:-300]
+    try:
+        persist_log(st.run_id, msg)
+    except Exception:
+        # Logging must never break the run
+        pass
+    st.updated_at = datetime.now(timezone.utc)
+
+
+def _persist_throttled(st: RunState, *, force: bool = False) -> None:
+    # Не пишем в файл слишком часто
+    now = time.time()
+    last = getattr(st, "_last_persist", 0.0)
+    if force or (now - last) >= 1.0 or (st.trials_done % 10 == 0):
+        try:
+            persist_state(st)
+            setattr(st, "_last_persist", now)
+        except Exception:
+            pass
 RUN_LOCK = asyncio.Lock()
 
 
@@ -601,10 +697,18 @@ def _optimize_run_html(run_id: str) -> str:
 
     <script>
       async function tick() {{
-        const res = await fetch(`/api/optimize/status?run_id={html.escape(run_id)}`);
+        let res;
+        try {
+          res = await fetch(`/api/optimize/status?run_id={html.escape(run_id)}`);
+        } catch (e) {
+          document.getElementById('statusLine').innerText = 'fetch error: ' + (e?.message || e);
+          setTimeout(tick, 1000);
+          return;
+        }
         const j = await res.json();
         if (!res.ok) {{
-          document.getElementById('statusLine').innerText = j.detail || 'error';
+          document.getElementById('statusLine').innerText = (j && j.detail) ? j.detail : ('http error ' + res.status);
+          setTimeout(tick, 1000);
           return;
         }}
         document.getElementById('statusLine').innerText = `status=${{j.status}} trials_done=${{j.trials_done}} best_score=${{j.best_score ?? ''}}`;
@@ -612,7 +716,7 @@ def _optimize_run_html(run_id: str) -> str:
           best_score: j.best_score,
           best_trial: j.best_trial,
           best_params: j.best_params,
-          best_metrics: j.best_metrics,
+          best_metrics: j.best_metricss,
           cfg: j.cfg,
           error: j.error
         }};
@@ -691,6 +795,7 @@ async def optimize_start(payload: Dict[str, Any]):
     }
 
     state = RunState(run_id=run_id, cfg=cfg)
+    persist_state(state)
     async with RUN_LOCK:
         RUNS[run_id] = state
 
@@ -705,20 +810,31 @@ async def optimize_start(payload: Dict[str, Any]):
 
 @router.get("/api/optimize/status")
 async def optimize_status(run_id: str = Query(...)):
+    # 1) if current worker has it in memory, persist to file (helps other workers)
     async with RUN_LOCK:
         st = RUNS.get(run_id)
-    if not st:
-        return JSONResponse(status_code=404, content={"detail": "run_id not found (maybe restarted service)"})
+    if st is not None:
+        _persist_throttled(st, force=True)
 
-    return {
-        "run_id": st.run_id,
-        "status": st.status,
-        "trials_done": st.trials_done,
-        "best_score": None if st.best_score == float("-inf") else st.best_score,
-        "best_trial": st.best_trial,
-        "best_params": st.best_params,
-        "best_metrics": st.best_metrics,
-        "cfg": st.cfg,
-        "error": st.error,
-        "logs": list(st.logs),
-    }
+    # 2) load from file system (works across multiple worker processes)
+    prog_path = _run_dir(run_id) / "progress.json"
+    if not prog_path.exists():
+        if st is None:
+            return JSONResponse(status_code=404, content={"detail": "run_id not found"})
+        # best-effort fallback
+        return {
+            "run_id": st.run_id,
+            "status": st.status,
+            "trials_done": st.trials_done,
+            "best_score": None if st.best_score == float("-inf") else st.best_score,
+            "best_trial": st.best_trial,
+            "best_params": st.best_params,
+            "best_metrics": st.best_metrics,
+            "cfg": st.cfg,
+            "error": st.error,
+            "logs": list(st.logs),
+        }
+
+    data = json.loads(prog_path.read_text(encoding="utf-8"))
+    data["logs"] = _tail_lines(_run_dir(run_id) / "log.txt", n=200)
+    return data

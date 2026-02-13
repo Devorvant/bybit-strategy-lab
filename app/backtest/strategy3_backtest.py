@@ -234,7 +234,11 @@ def backtest_strategy3(
     cur_day = datetime.utcfromtimestamp(ts[0] / 1000).date()
 
     def mark_to_market(i: int) -> float:
-        if pos == 0:
+        # Be defensive: some data sources may occasionally provide zero/invalid prices.
+        # In that case, avoid division by zero and treat position as not markable.
+        if pos == 0 or entry_price <= 0:
+            return realized
+        if c[i] <= 0:
             return realized
         unreal = position_usd * pos * (c[i] - entry_price) / entry_price
         return realized + unreal
@@ -251,6 +255,11 @@ def backtest_strategy3(
 
         # 1) Emergency stop (intrabar). If triggered, we exit and stay flat for this bar.
         if use_emergency_sl and pos != 0 and atr_v[i] is not None:
+            # If entry price is invalid, flatten without blowing up.
+            if entry_price <= 0:
+                pos = 0
+                equity[-1] = realized
+                continue
             if pos == 1:
                 stop_px = entry_price - atr_v[i] * atr_mult
                 if l[i] <= stop_px:
@@ -281,6 +290,11 @@ def backtest_strategy3(
         if no_trade[i]:
             if pos != 0:
                 px = c[i]
+                if entry_price <= 0 or px <= 0:
+                    # Bad tick; just flatten.
+                    pos = 0
+                    equity[-1] = realized
+                    continue
                 pnl = position_usd * pos * (px - entry_price) / entry_price
                 realized += pnl
                 cum += pnl
@@ -311,23 +325,34 @@ def backtest_strategy3(
             continue
 
         px = c[i]
+        # Never open/close on an invalid price.
+        if px <= 0:
+            continue
 
         # close opposite if needed
         if flip_to_long and pos == -1:
-            pnl = position_usd * pos * (px - entry_price) / entry_price
-            realized += pnl
-            cum += pnl
-            trades.append(Trade("SHORT", entry_ts, entry_price, ts[i], px, pnl, "ST_FLIP", cum))
-            pos = 0
-            equity[-1] = realized
+            if entry_price <= 0:
+                pos = 0
+                equity[-1] = realized
+            else:
+                pnl = position_usd * pos * (px - entry_price) / entry_price
+                realized += pnl
+                cum += pnl
+                trades.append(Trade("SHORT", entry_ts, entry_price, ts[i], px, pnl, "ST_FLIP", cum))
+                pos = 0
+                equity[-1] = realized
 
         if flip_to_short and pos == 1:
-            pnl = position_usd * pos * (px - entry_price) / entry_price
-            realized += pnl
-            cum += pnl
-            trades.append(Trade("LONG", entry_ts, entry_price, ts[i], px, pnl, "ST_FLIP", cum))
-            pos = 0
-            equity[-1] = realized
+            if entry_price <= 0:
+                pos = 0
+                equity[-1] = realized
+            else:
+                pnl = position_usd * pos * (px - entry_price) / entry_price
+                realized += pnl
+                cum += pnl
+                trades.append(Trade("LONG", entry_ts, entry_price, ts[i], px, pnl, "ST_FLIP", cum))
+                pos = 0
+                equity[-1] = realized
 
         # open new
         if pos == 0:
@@ -341,6 +366,14 @@ def backtest_strategy3(
     if pos != 0:
         last_i = len(bars) - 1
         cur_px = c[last_i]
+
+        # If we somehow ended up with an invalid entry/price, just report flat.
+        if entry_price <= 0 or cur_px <= 0:
+            pos = 0
+            open_position = None
+            if equity:
+                equity[-1] = realized
+            return BacktestResult(trades, open_position, equity_ts, equity, st_line, st_dir, adx_v, no_trade)
 
         if close_at_end:
             # Force-close the position on the last candle (useful for pure backtests).

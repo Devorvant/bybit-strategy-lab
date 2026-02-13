@@ -6,6 +6,7 @@ import html
 import json
 import time
 import uuid
+import traceback
 import os
 from pathlib import Path
 import threading
@@ -18,7 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from app.config import settings
 from app.storage.db import load_bars
 
-from app.backtest.strategy3_backtest import backtest_strategy3
+from app.backtest.strategy3_backtest_tv_like import backtest_strategy3_tv_like as backtest_strategy3
 
 
 router = APIRouter()
@@ -483,8 +484,9 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     except Exception as e:  # pragma: no cover
         run.finished_at = time.time()
         run.status = "error"
-        run.error = repr(e)
-        run.logs.append("ERROR " + run.error)
+        run.error = f"{type(e).__name__}: {e}"
+        tb = traceback.format_exc()
+        _append_log(run, "ERROR " + run.error + "\n" + tb)
         # Persist error summary
         try:
             _ensure_opt_results_table(conn)
@@ -658,7 +660,13 @@ def _optimize_index_html(conn) -> str:
           headers: {{ 'Content-Type': 'application/json' }},
           body: JSON.stringify(payload)
         }});
-        const j = await res.json();
+        let j = null;
+        try {
+          j = await res.clone().json();
+        } catch (e) {
+          const t = await res.text();
+          j = { detail: t };
+        }
         if (!res.ok) {{
           alert(j.detail || 'Failed');
           return;
@@ -705,7 +713,13 @@ def _optimize_run_html(run_id: str) -> str:
           setTimeout(tick, 1000);
           return;
         }}
-        const j = await res.json();
+        let j = null;
+        try {
+          j = await res.clone().json();
+        } catch (e) {
+          const t = await res.text();
+          j = { detail: t };
+        }
         if (!res.ok) {{
           document.getElementById('statusLine').innerText = (j && j.detail) ? j.detail : ('http error ' + res.status);
           setTimeout(tick, 1000);

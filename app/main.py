@@ -17,6 +17,9 @@ app.include_router(tv_debug_router)
 from app.reporting.tv_ingest import router as tv_ingest_router
 app.include_router(tv_ingest_router)
 
+from app.reporting.optimize_web import router as optimize_router
+app.include_router(optimize_router)
+
 conn = None
 
 

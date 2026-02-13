@@ -36,6 +36,7 @@ def _build_plot_html(
     bars: Sequence[Tuple[int, float, float, float, float, float]],
     *,
     strategy: str,
+    strategy_params: Optional[dict] = None,
 ) -> str:
     """Return Plotly HTML fragment (no outer <html> tag)."""
     if not bars:
@@ -53,24 +54,28 @@ def _build_plot_html(
 
     # Backtest to draw trades + equity
     if strategy == "my_strategy3.py":
-        bt = backtest_strategy3(
-            bars,
-            position_usd=1000.0,
-            adx_len=14,
-            adx_smooth=14,
-            adx_no_trade_below=14.0,
-            st_atr_len=14,
-            st_factor=4.0,
-            use_no_trade=True,
-            use_rev_cooldown=True,
-            rev_cooldown_hrs=8,
-            use_flip_limit=False,
-            max_flips_per_day=6,
-            use_emergency_sl=True,
-            atr_len=14,
-            sl_atr_mult=3.0,
-            close_at_end=False,
-        )
+        params = {
+            # Defaults (keep in sync with UI initial state)
+            "position_usd": 1000.0,
+            "adx_len": 14,
+            "adx_smooth": 14,
+            "adx_no_trade_below": 14.0,
+            "st_atr_len": 14,
+            "st_factor": 4.0,
+            "use_no_trade": True,
+            "use_rev_cooldown": True,
+            "rev_cooldown_hrs": 8,
+            "use_flip_limit": False,
+            "max_flips_per_day": 6,
+            "use_emergency_sl": True,
+            "atr_len": 14,
+            "atr_mult": 3.0,
+            "close_at_end": False,
+        }
+        if strategy_params:
+            params.update(strategy_params)
+
+        bt = backtest_strategy3(bars, **params)
         df["st_line"] = pd.Series(bt.st_line)
         df["st_dir"] = pd.Series(bt.st_dir)
         df["adx"] = pd.Series(bt.adx)
@@ -485,6 +490,12 @@ def make_chart_html(
     strategy: str = "my_strategy.py",
     symbols: Optional[Iterable[str]] = None,
     tfs: Optional[Iterable[str]] = None,
+    # Optional optimizer integration
+    opt_strategy: Optional[str] = None,
+    opt_results: Optional[Sequence[tuple]] = None,
+    opt_id: Optional[int] = None,
+    opt_last: int = 20,
+    opt_params: Optional[dict] = None,
 ) -> str:
     """Render a simple chart page with controls (symbol/tf/limit)."""
 
@@ -504,14 +515,35 @@ def make_chart_html(
     if strategy not in available_strategies:
         strategy = "my_strategy.py"
 
-    plot_html = _build_plot_html(bars, strategy=strategy)
+    plot_html = _build_plot_html(bars, strategy=strategy, strategy_params=opt_params)
 
     # Build trades table
     try:
         if strategy == "my_strategy2.py":
             bt = backtest_sma_adx_filter(bars, close_at_end=False)
         elif strategy == "my_strategy3.py":
-            bt = backtest_strategy3(bars, close_at_end=False)
+            # Keep trades table in sync with the chart parameters.
+            params = {
+                "position_usd": 1000.0,
+                "adx_len": 14,
+                "adx_smooth": 14,
+                "adx_no_trade_below": 14.0,
+                "st_atr_len": 14,
+                "st_factor": 4.0,
+                "use_no_trade": True,
+                "use_rev_cooldown": True,
+                "rev_cooldown_hrs": 8,
+                "use_flip_limit": False,
+                "max_flips_per_day": 6,
+                "use_emergency_sl": True,
+                "atr_len": 14,
+                "atr_mult": 3.0,
+                "close_at_end": False,
+            }
+            # opt_params is injected via make_chart_html signature below
+            if opt_params:
+                params.update(opt_params)
+            bt = backtest_strategy3(bars, **params)
         elif strategy == "my_strategy_tv_like.py":
             bt = backtest_sma_cross_tv_like(bars, fee_rate=0.0, slippage_bps=0.0, close_at_end=False)
         elif strategy == "my_strategy3_tv_like.py":
@@ -559,6 +591,34 @@ def make_chart_html(
         for s in available_strategies
     )
 
+    # Optimizer dropdown (per-strategy, optional)
+    opt_controls_html = ""
+    if opt_strategy and (opt_results is not None) and strategy == "my_strategy3.py":
+        # opt_results rows: (id, created_at, best_score)
+        def _fmt_created(x) -> str:
+            try:
+                # datetime
+                if hasattr(x, "strftime"):
+                    return x.strftime("%Y-%m-%d %H:%M:%S")
+                return str(x)
+            except Exception:
+                return str(x)
+
+        opt_opts = [
+            f"<option value='' {'selected' if not opt_id else ''}>Current (defaults)</option>"
+        ]
+        for rid, created_at, best_score in (opt_results or []):
+            label = f"#{rid} {html.escape(_fmt_created(created_at))}  score={best_score:.4f}" if best_score is not None else f"#{rid} {html.escape(_fmt_created(created_at))}"
+            sel = "selected" if (opt_id is not None and int(opt_id) == int(rid)) else ""
+            opt_opts.append(f"<option value='{int(rid)}' {sel}>{label}</option>")
+
+        opt_controls_html = f"""
+        <label>Optimized</label>
+        <select name="opt_id" title="Load optimized parameters">{''.join(opt_opts)}</select>
+        <label>Last</label>
+        <input name="opt_last" value="{int(opt_last)}" style="width:70px" title="How many recent results to show"/>
+        """
+
     return f"""
 <!doctype html>
 <html>
@@ -604,6 +664,8 @@ def make_chart_html(
 
     <label>Strategy</label>
     <select name="strategy">{strategy_options}</select>
+
+    {opt_controls_html}
 
     <label>Limit</label>
     <input name="limit" value="{int(limit)}" style="width:90px"/>

@@ -291,6 +291,8 @@ def main() -> None:
 
     print(f"RUN_START symbol={symbol} tf={tf} bars={len(bars)} trials={args.trials}")
 
+    train_bars, val_bars = _train_val_split(bars, float(args.train_frac))
+
     try:
         for trial in range(1, int(args.trials) + 1):
             if args.max_seconds and (time.time() - t0) >= int(args.max_seconds):
@@ -298,8 +300,18 @@ def main() -> None:
                 break
 
             params = _sample_params(rng, float(args.position_usd))
-            _, va = _train_val_split(bars, float(args.train_frac))
-            bt = backtest_strategy3(va, **params)
+            try:
+                bt = backtest_strategy3(val_bars, **params)
+            except Exception as e:
+                trials_done = trial
+                no_improve += 1
+                print(f"[{trial}/{args.trials}] TRIAL_ERROR {repr(e)}")
+                if trial % max(1, int(args.trials) // 20) == 0:
+                    print(f"PROGRESS trial={trial} best={best_score:.6f} best_trial={best_trial}")
+                if args.patience and no_improve >= int(args.patience):
+                    print(f"EARLY_STOP patience={args.patience} reached at trial={trial} best_trial={best_trial}")
+                    break
+                continue
             m = _equity_metrics(bt.equity)
             trades = len(bt.trades)
             s = _score(
@@ -342,7 +354,7 @@ def main() -> None:
             symbol=symbol,
             tf=tf,
             config=cfg,
-            status="done",
+            status="done" if best_score != float("-inf") else "error",
             duration_sec=float(duration),
             trials_done=int(trials_done),
             best_score=None if best_score == float("-inf") else float(best_score),

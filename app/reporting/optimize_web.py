@@ -7,6 +7,7 @@ import json
 import time
 import uuid
 import os
+import datetime as dt
 from pathlib import Path
 import threading
 from dataclasses import dataclass, field
@@ -72,6 +73,9 @@ def _lock_for(run_id: str) -> threading.Lock:
 def _run_dir(run_id: str) -> Path:
     return RUN_DIR / run_id
 
+def _log_path(run_id: str) -> Path:
+    return _run_dir(run_id) / "log.txt"
+
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -116,17 +120,21 @@ def persist_state(st: RunState) -> None:
 
 def persist_log(run_id: str, msg: str) -> None:
     with _lock_for(run_id):
-        _append_line(_run_dir(run_id) / "log.txt", msg)
+        _append_line(_log_path(run_id), msg)
 
 def _add_log(st: RunState, msg: str) -> None:
-    # Keep an in-memory rolling log and also persist a text file under /tmp
+    """Append to in-memory log and persist to /tmp.
+
+    This is critical on Railway where HTTP requests and the optimizer may run in
+    different worker processes.
+    """
     ts = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     line = f"{ts} {msg}"
     st.logs.append(line)
     try:
-        _append_line(_log_path(st.run_id), line)
+        persist_log(st.run_id, line)
     except Exception:
-        # never fail the optimizer because of logging
+        # Never fail the optimizer because of logging.
         pass
 
 def _persist_throttled(st: RunState, *, force: bool = False) -> None:
@@ -416,12 +424,14 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     no_improve = 0
 
     run.status = "running"
-    run.logs.append(f"RUN_START run_id={run.run_id} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}")
+    _add_log(run, f"RUN_START run_id={run.run_id} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}")
+    # Make sure the run page can show status even if it is served by another worker.
+    _persist_throttled(run, force=True)
 
     try:
         for trial in range(1, trials + 1):
             if max_seconds and (time.time() - t0) >= max_seconds:
-                run.logs.append(f"STOP max_seconds reached at trial={trial-1}")
+                _add_log(run, f"STOP max_seconds reached at trial={trial-1}")
                 break
 
             params = _sample_params(rng, position_usd)
@@ -432,6 +442,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
             s = _score(m, trades, weights, min_trades)
 
             run.trials_done = trial
+            _persist_throttled(run)
 
             if s > run.best_score:
                 run.best_score = s
@@ -439,7 +450,8 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                 run.best_trial = trial
                 run.best_metrics = {**m, "trades": trades, "val_score": s}
                 no_improve = 0
-                run.logs.append(
+                _add_log(
+                    run,
                     f"[{trial}/{trials}] best={run.best_score:.6f} (trial={run.best_trial}) "
                     f"ret={m['ret']:.4f} dd={m['dd']:.4f} sharpe={m['sharpe']:.3f} trades={trades} "
                     f"st_factor={params['st_factor']:.2f} adx_nt<{params['adx_no_trade_below']:.1f} atr_mult={params['atr_mult']:.2f} cooldown={params['rev_cooldown_hrs']}h"
@@ -449,23 +461,27 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
 
             # occasional progress line
             if trial % max(1, trials // 20) == 0:
-                run.logs.append(f"PROGRESS trial={trial} best={run.best_score:.6f} best_trial={run.best_trial}")
+                _add_log(run, f"PROGRESS trial={trial} best={run.best_score:.6f} best_trial={run.best_trial}")
 
             if patience and no_improve >= patience:
-                run.logs.append(f"EARLY_STOP patience={patience} reached at trial={trial} best_trial={run.best_trial}")
+                _add_log(run, f"EARLY_STOP patience={patience} reached at trial={trial} best_trial={run.best_trial}")
                 break
 
         run.finished_at = time.time()
         run.status = "done"
+        _persist_throttled(run, force=True)
 
         dur = run.finished_at - run.started_at
-        run.logs.append(
+        _add_log(
+            run,
             f"DONE run_id={run.run_id} trials_done={run.trials_done} best_score={run.best_score:.6f} best_trial={run.best_trial} duration_sec={dur:.1f}"
         )
         if run.best_params:
-            run.logs.append("BEST_PARAMS " + json.dumps(run.best_params, ensure_ascii=False))
+            _add_log(run, "BEST_PARAMS " + json.dumps(run.best_params, ensure_ascii=False))
         if run.best_metrics:
-            run.logs.append("BEST_METRICS " + json.dumps(run.best_metrics, ensure_ascii=False))
+            _add_log(run, "BEST_METRICS " + json.dumps(run.best_metrics, ensure_ascii=False))
+
+        _persist_throttled(run, force=True)
 
         # Persist ONLY final result
         _ensure_opt_results_table(conn)
@@ -487,7 +503,8 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
         run.finished_at = time.time()
         run.status = "error"
         run.error = repr(e)
-        run.logs.append("ERROR " + run.error)
+        _add_log(run, "ERROR " + run.error)
+        _persist_throttled(run, force=True)
         # Persist error summary
         try:
             _ensure_opt_results_table(conn)

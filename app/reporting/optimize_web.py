@@ -920,58 +920,66 @@ def _optimize_run_html(run_id: str) -> str:
       <pre id="log">loading...</pre>
     </div>
 
-    <!-- IMPORTANT: use external script, because some hosting setups enable CSP that blocks inline scripts. -->
-    <div id="runRoot" data-run-id="__RUN_ID__"></div>
-    <script src="/optimize/run.js?run_id=__RUN_ID__&v=1"></script>
+    <!-- Use an external script so the page works even when inline scripts are blocked by CSP -->
+    <script defer src="/optimize/run.js?run_id=__RUN_ID__&v=__RUN_ID__"></script>
     """
     body = body_tpl.replace("__RUN_ID__", run_id_safe)
     return _page_shell("Optimizer run", body)
 
 
 def _optimize_run_js(run_id: str) -> str:
-    """External JS for /optimize/run/<id> page.
+    """Client-side logic for /optimize/run/<id>.
 
-    We keep it as a separate resource to avoid CSP issues with inline scripts.
+    Served as an external JS file to avoid CSP issues with inline scripts.
     """
 
-    # run_id is already validated by route/query, but keep it simple.
-    run_id_safe = run_id.replace("\\", "").replace("\"", "").replace("'", "")
-    return f"""(function(){{
-  const runId = "{run_id_safe}";
+    # Keep the script small and dependency-free.
+    return f"""
+(function() {{
+  const runId = {json.dumps(run_id)};
   const elStatus = document.getElementById('status');
   const elBest = document.getElementById('best');
   const elLog = document.getElementById('log');
-  if (!elStatus || !elBest || !elLog) return;
 
-  function fmtSec(s){{
-    const x = Number(s || 0);
-    return x.toFixed(1);
-  }}
+  function setText(el, txt) {{ if (el) el.textContent = txt; }}
 
-  async function tick(){{
+  async function tick() {{
     try {{
-      const r = await fetch(`/api/optimize/status?run_id=${{encodeURIComponent(runId)}}`, {{ cache: 'no-store' }});
+      const url = `/api/optimize/status?run_id=${{encodeURIComponent(runId)}}&_=${{Date.now()}}`;
+      const r = await fetch(url, {{ cache: 'no-store' }});
       const j = await r.json();
-      elStatus.textContent = `status=${{j.status}}  trial=${{j.trial || 0}}/${{j.trials || 0}}  elapsed=${{fmtSec(j.elapsed_s)}}s`;
+
+      const trial = (j.trial ?? j.trials_done ?? 0);
+      const trials = (j.trials ?? 0);
+      const elapsed = (j.elapsed_s ?? 0);
+      setText(elStatus, `status=${{j.status}}  trial=${{trial}}/${{trials}}  elapsed=${{elapsed.toFixed ? elapsed.toFixed(1) : elapsed}}s`);
 
       if (j.best_score !== null && j.best_score !== undefined) {{
-        elBest.textContent = JSON.stringify({{ best_score: j.best_score, best_trial: j.best_trial, best_params: j.best_params, best_metrics: j.best_metrics }}, null, 2);
+        const bestObj = {{
+          best_score: j.best_score,
+          best_trial: j.best_trial,
+          best_params: j.best_params,
+          best_metrics: j.best_metrics,
+        }};
+        setText(elBest, JSON.stringify(bestObj, null, 2));
       }}
 
-      const lines = Array.isArray(j.logs) ? j.logs : (typeof j.logs === 'string' ? j.logs.split(/\n/) : []);
-      elLog.textContent = lines.join('\n');
+      const logs = Array.isArray(j.logs) ? j.logs : [];
+      setText(elLog, logs.join('\n'));
 
       if (j.status === 'done' || j.status === 'error') {{
-        clearInterval(timer);
+        if (window.__optTimer) clearInterval(window.__optTimer);
+        window.__optTimer = null;
       }}
     }} catch (e) {{
-      elStatus.textContent = 'error: ' + (e && e.message ? e.message : e);
+      setText(elStatus, 'error: ' + (e && e.message ? e.message : String(e)));
     }}
   }}
 
   tick();
-  const timer = setInterval(tick, 1000);
-}})();"""
+  window.__optTimer = setInterval(tick, 1000);
+}})();
+"""
 
 
 # ------------------------------
@@ -993,14 +1001,19 @@ def optimize_run(run_id: str):
 
 @router.get("/optimize/run.js")
 def optimize_run_js(run_id: str = Query(...)):
-    """JS bundle for the run page.
+    """External JS for the run page.
 
-    Served as an external script to avoid environments where CSP blocks inline
-    scripts (which would otherwise leave the page stuck on "loading...").
+    Many hosting setups (or user browser extensions) block inline scripts via
+    Content-Security-Policy, which would leave the page stuck on "loading...".
+    Serving JS from the same origin avoids that.
     """
 
     js = _optimize_run_js(run_id)
-    return Response(content=js, media_type="application/javascript")
+    return Response(
+        content=js,
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.post("/api/optimize/start")

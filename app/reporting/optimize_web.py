@@ -698,13 +698,13 @@ def _optimize_run_html(run_id: str) -> str:
     <script>
       async function tick() {{
         let res;
-        try {
+        try {{
           res = await fetch(`/api/optimize/status?run_id={html.escape(run_id)}`);
-        } catch (e) {
+        }} catch (e) {{
           document.getElementById('statusLine').innerText = 'fetch error: ' + (e?.message || e);
           setTimeout(tick, 1000);
           return;
-        }
+        }}
         const j = await res.json();
         if (!res.ok) {{
           document.getElementById('statusLine').innerText = (j && j.detail) ? j.detail : ('http error ' + res.status);

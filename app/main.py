@@ -155,7 +155,7 @@ def chart(
             if settings.DATABASE_URL and settings.DATABASE_URL.startswith("postgres"):
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT id, created_at, best_score FROM opt_results "
+                        "SELECT id, created_at, best_score, best_metrics FROM opt_results "
                         "WHERE status='done' AND strategy=%s AND symbol=%s AND tf=%s "
                         "ORDER BY created_at DESC LIMIT %s",
                         (opt_strategy, symbol, tf, opt_last),
@@ -174,7 +174,7 @@ def chart(
                 # SQLite
                 cur = conn.cursor()
                 cur.execute(
-                    "SELECT id, created_at, best_score FROM opt_results "
+                    "SELECT id, created_at, best_score, best_metrics FROM opt_results "
                     "WHERE status='done' AND strategy=? AND symbol=? AND tf=? "
                     "ORDER BY created_at DESC LIMIT ?",
                     (opt_strategy, symbol, tf, opt_last),

@@ -1,6 +1,8 @@
 import asyncio
 from typing import List
 
+import json
+
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 from app.config import settings
@@ -105,6 +107,8 @@ def chart(
     tf: str = Query(None),
     limit: int = Query(5000, ge=10, le=50000),
     strategy: str = Query("my_strategy.py"),
+    opt_id: str | None = Query(None),
+    opt_last: int = Query(20, ge=1, le=200),
 ):
     tf = tf or settings.TF
     symbol = symbol.upper()
@@ -114,6 +118,81 @@ def chart(
     symbols = _db_distinct_symbols()
     tfs = _db_distinct_tfs(symbol)
 
+    # Optional: load optimized parameters for a strategy (if available)
+    opt_results = []
+    opt_params = None
+    opt_strategy_map = {
+        # chart strategy -> optimizer key (stored in opt_results.strategy)
+        "my_strategy3.py": "strategy3",
+        # Future/optional:
+        # "my_strategy2.py": "strategy2",
+        # "my_strategy.py": "sma_cross",
+        # "my_strategy_tv_like.py": "sma_cross_tv",
+        # "my_strategy3_tv_like.py": "strategy3_tv",
+    }
+    opt_strategy = opt_strategy_map.get(strategy)
+
+    opt_id_int: int | None = None
+    if opt_id is not None:
+        s = str(opt_id).strip()
+        if s.isdigit():
+            opt_id_int = int(s)
+
+    def _json_to_dict(x):
+        if x is None:
+            return None
+        if isinstance(x, dict):
+            return x
+        if isinstance(x, str):
+            try:
+                return json.loads(x)
+            except Exception:
+                return None
+        return None
+
+    if opt_strategy:
+        try:
+            if settings.DATABASE_URL and settings.DATABASE_URL.startswith("postgres"):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id, created_at, best_score FROM opt_results "
+                        "WHERE status='done' AND strategy=%s AND symbol=%s AND tf=%s "
+                        "ORDER BY created_at DESC LIMIT %s",
+                        (opt_strategy, symbol, tf, opt_last),
+                    )
+                    opt_results = cur.fetchall() or []
+                if opt_id_int is not None:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT best_params FROM opt_results "
+                            "WHERE id=%s AND status='done' AND strategy=%s AND symbol=%s AND tf=%s",
+                            (opt_id_int, opt_strategy, symbol, tf),
+                        )
+                        row = cur.fetchone()
+                    opt_params = _json_to_dict(row[0] if row else None)
+            else:
+                # SQLite
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT id, created_at, best_score FROM opt_results "
+                    "WHERE status='done' AND strategy=? AND symbol=? AND tf=? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (opt_strategy, symbol, tf, opt_last),
+                )
+                opt_results = cur.fetchall() or []
+                if opt_id_int is not None:
+                    cur.execute(
+                        "SELECT best_params FROM opt_results "
+                        "WHERE id=? AND status='done' AND strategy=? AND symbol=? AND tf=?",
+                        (opt_id_int, opt_strategy, symbol, tf),
+                    )
+                    row = cur.fetchone()
+                    opt_params = _json_to_dict(row[0] if row else None)
+        except Exception:
+            # If opt tables are missing or query fails, just ignore and render chart with defaults.
+            opt_results = []
+            opt_params = None
+
     return make_chart_html(
         rows,
         symbol=symbol,
@@ -122,4 +201,9 @@ def chart(
         symbols=symbols,
         tfs=tfs,
         strategy=strategy,
+        opt_strategy=opt_strategy,
+        opt_results=opt_results,
+        opt_id=opt_id_int,
+        opt_last=opt_last,
+        opt_params=opt_params,
     )

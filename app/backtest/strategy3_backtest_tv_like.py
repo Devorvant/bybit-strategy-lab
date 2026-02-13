@@ -376,6 +376,9 @@ def backtest_strategy3_tv_like(
         notional = max(0.0, realized_equity * (percent_of_equity / 100.0))
         if notional <= 0:
             return
+        if fill_px is None or fill_px <= 0:
+            # Bad / missing price (can happen with sparse or dirty feeds). Skip opening.
+            return
         qty = notional / fill_px
         fee_ent = notional * fee_rate
         realized_equity -= fee_ent

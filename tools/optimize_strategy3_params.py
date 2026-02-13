@@ -178,7 +178,10 @@ def _equity_metrics(equity: List[float]) -> Dict[str, float]:
     for v in equity:
         if v > peak:
             peak = v
-        dd = (v / peak) - 1.0
+        if peak != 0:
+            dd = (v / peak) - 1.0
+        else:
+            dd = 0.0
         if dd < max_dd:
             max_dd = dd
     dd_abs = abs(max_dd)

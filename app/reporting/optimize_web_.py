@@ -598,9 +598,17 @@ def _train_val_split(bars: List[Tuple[int, float, float, float, float, float]], 
 
 
 def _sample_params(rng, position_usd: float) -> Dict[str, Any]:
+    """Sample a candidate parameter set.
+
+    We keep core indicator lengths fixed for stability, but allow a few boolean
+    regime switches to vary. This increases expressiveness without exploding
+    the search space too much.
+    """
+    use_flip_limit = rng.choice([False, True])
     return {
         "position_usd": float(position_usd),
-        "use_no_trade": True,
+        # was fixed True before; now we let optimizer choose
+        "use_no_trade": rng.choice([True, False]),
         "adx_len": 14,
         "adx_smooth": 14,
         "adx_no_trade_below": rng.uniform(10.0, 25.0),
@@ -608,8 +616,9 @@ def _sample_params(rng, position_usd: float) -> Dict[str, Any]:
         "st_factor": rng.uniform(2.0, 6.0),
         "use_rev_cooldown": True,
         "rev_cooldown_hrs": rng.choice([0, 2, 4, 6, 8, 12, 16]),
-        "use_flip_limit": False,
-        "max_flips_per_day": 6,
+        # new: allow limiting flips/day
+        "use_flip_limit": bool(use_flip_limit),
+        "max_flips_per_day": rng.choice([2, 3, 4, 5, 6, 8, 10, 12]) if use_flip_limit else 6,
         "use_emergency_sl": True,
         "atr_len": 14,
         "atr_mult": rng.uniform(1.5, 5.0),
@@ -750,7 +759,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
 # ------------------------------
 
 
-def _page_shell(title: str, body: str) -> str:
+def _page_shell(title: str, body: str, head_extra: str = "") -> str:
     return f"""<!doctype html>
 <html lang='ru'>
 <head>
@@ -773,6 +782,7 @@ def _page_shell(title: str, body: str) -> str:
     .muted {{ opacity: .75; }}
     .pill {{ display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #22315c; }}
   </style>
+  {head_extra}
 </head>
 <body>
   <div class='wrap'>
@@ -941,8 +951,91 @@ def _optimize_index_html(conn) -> str:
 
 
 def _optimize_run_html(run_id: str) -> str:
+    """Render run page without JS.
+
+    Railway/hosting environments may set a strict CSP that blocks inline
+    scripts, which would leave the page stuck on "loading...". We therefore
+    render the latest snapshot server-side and use meta-refresh while running.
+    """
+
+    from app.main import conn  # noqa: WPS433
+
     run_id_safe = html.escape(run_id)
-    body_tpl = """
+
+    # Try /tmp snapshot first (fast on same replica), then DB snapshot.
+    prog_path = _run_dir(run_id) / "progress.json"
+    data = None
+    logs = []
+    if prog_path.exists():
+        try:
+            data = json.loads(prog_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"run_id": run_id, "status": "unknown"}
+        logs = _tail_lines(_log_path(run_id), n=200)
+    else:
+        try:
+            _ensure_opt_run_state_table(conn)
+            data = _load_opt_run_state(conn, run_id)
+            if data is not None:
+                logs = data.get("logs", []) or []
+        except Exception:
+            data = None
+
+    if data is None:
+        # Not found: show a minimal page with a hint.
+        body = f"""
+        <div class="header">
+          <div>
+            <h1>Optimizer run</h1>
+            <div class="muted">Оптимизация Strategy 3 (2h). Итерации показываем в вебе, в Postgres сохраняем только итог.</div>
+          </div>
+          <div class="row">
+            <a class="btn" href="/chart">Chart</a>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="row" style="justify-content:space-between;">
+            <div>
+              <div class="muted">run_id:</div>
+              <div><span class="pill">{run_id_safe}</span></div>
+            </div>
+            <div><a class="btn" href="/optimize">← back</a></div>
+          </div>
+          <div style="height:8px"></div>
+          <div class="muted">run_id не найден. Возможно, оптимизация уже завершилась, а запись о прогрессе была очищена. Проверь список результатов на странице /optimize.</div>
+        </div>
+        """
+        return _page_shell("Optimizer run", body)
+
+    status = str(data.get("status", "unknown"))
+    trial = int(data.get("trial") or data.get("trials_done") or 0)
+    trials = int(data.get("trials") or 0)
+    elapsed = float(data.get("elapsed_s") or 0.0)
+    best_score = data.get("best_score")
+    best_trial = data.get("best_trial")
+    best_params = data.get("best_params")
+    best_metrics = data.get("best_metrics")
+    err = data.get("error")
+
+    refresh = ""
+    if status not in ("done", "error"):
+        refresh = '<meta http-equiv="refresh" content="2">'
+
+    best_obj = {
+        "best_score": best_score,
+        "best_trial": best_trial,
+        "best_params": best_params,
+        "best_metrics": best_metrics,
+    }
+
+    best_pre = html.escape(json.dumps(best_obj, ensure_ascii=False, indent=2))
+    logs_pre = html.escape("
+".join(logs))
+    err_html = f"<div class="muted" style="margin-top:8px;color:#ffb4b4">{html.escape(str(err))}</div>" if err else ""
+
+    body = f"""
+    {refresh}
     <div class="header">
       <div>
         <h1>Optimizer run</h1>
@@ -957,52 +1050,26 @@ def _optimize_run_html(run_id: str) -> str:
       <div class="row" style="justify-content:space-between;">
         <div>
           <div class="muted">run_id:</div>
-          <div><span class="pill">__RUN_ID__</span></div>
+          <div><span class="pill">{run_id_safe}</span></div>
         </div>
         <div><a class="btn" href="/optimize">← back</a></div>
       </div>
       <div style="height:8px"></div>
-
-      <div class="muted" id="status">loading...</div>
+      <div class="muted">status={html.escape(status)} trial={trial}/{trials} elapsed={elapsed:.1f}s</div>
+      {err_html}
     </div>
 
     <div class="card">
       <h2>Best</h2>
-      <pre id="best">—</pre>
+      <pre>{best_pre}</pre>
     </div>
 
     <div class="card">
       <h2>Progress log</h2>
-      <pre id="log">loading...</pre>
+      <pre>{logs_pre}</pre>
     </div>
-
-    <script>
-      const runId = "__RUN_ID__";
-      const elStatus = document.getElementById('status');
-      const elBest = document.getElementById('best');
-      const elLog = document.getElementById('log');
-
-      async function tick() {
-        try {
-          const r = await fetch(`/api/optimize/status?run_id=${encodeURIComponent(runId)}`);
-          const j = await r.json();
-          elStatus.textContent = `status=${j.status}  trial=${j.trial || 0}/${j.trials || 0}  elapsed=${j.elapsed_s || 0}s`;
-          if (j.best_score !== null && j.best_score !== undefined) {
-            elBest.textContent = JSON.stringify({best_score: j.best_score, best_params: j.best_params, best_metrics: j.best_metrics}, null, 2);
-          }
-          elLog.textContent = (j.logs || []).join('\n');
-          if (j.status === 'done' || j.status === 'error') {
-            clearInterval(timer);
-          }
-        } catch (e) {
-          elStatus.textContent = 'error: ' + (e && e.message ? e.message : e);
-        }
-      }
-      tick();
-      const timer = setInterval(tick, 1000);
-    </script>
     """
-    body = body_tpl.replace("__RUN_ID__", run_id_safe)
+
     return _page_shell("Optimizer run", body)
 
 
@@ -1066,8 +1133,8 @@ async def optimize_start(payload: Dict[str, Any]):
         "w_dd": 1.5,
         "w_vol": 0.1,
         "w_sharpe": 0.5,
-        "w_time_dd": 1.0,
-        "w_ulcer": 0.5,
+        "w_time_dd": 4.0,
+        "w_ulcer": 2.0,
     }
 
     state = RunState(run_id=run_id, cfg=cfg)

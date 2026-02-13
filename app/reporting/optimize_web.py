@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from app.config import settings
 from app.storage.db import load_bars
@@ -920,37 +920,58 @@ def _optimize_run_html(run_id: str) -> str:
       <pre id="log">loading...</pre>
     </div>
 
-    <script>
-      const runId = "__RUN_ID__";
-      const elStatus = document.getElementById('status');
-      const elBest = document.getElementById('best');
-      const elLog = document.getElementById('log');
-
-      async function tick() {
-        try {
-          const ac = new AbortController();
-          const t = setTimeout(() => ac.abort(), 5000);
-          const r = await fetch(`/api/optimize/status?run_id=${encodeURIComponent(runId)}`, { signal: ac.signal });
-          clearTimeout(t);
-          const j = await r.json();
-          elStatus.textContent = `status=${j.status}  trial=${j.trial || 0}/${j.trials || 0}  elapsed=${j.elapsed_s || 0}s`;
-          if (j.best_score !== null && j.best_score !== undefined) {
-            elBest.textContent = JSON.stringify({best_score: j.best_score, best_params: j.best_params, best_metrics: j.best_metrics}, null, 2);
-          }
-          elLog.textContent = (j.logs || []).join('\n');
-          if (j.status === 'done' || j.status === 'error') {
-            clearInterval(timer);
-          }
-        } catch (e) {
-          elStatus.textContent = 'error: ' + (e && e.message ? e.message : e);
-        }
-      }
-      tick();
-      const timer = setInterval(tick, 1000);
-    </script>
+    <!-- IMPORTANT: use external script, because some hosting setups enable CSP that blocks inline scripts. -->
+    <div id="runRoot" data-run-id="__RUN_ID__"></div>
+    <script src="/optimize/run.js?run_id=__RUN_ID__&v=1"></script>
     """
     body = body_tpl.replace("__RUN_ID__", run_id_safe)
     return _page_shell("Optimizer run", body)
+
+
+def _optimize_run_js(run_id: str) -> str:
+    """External JS for /optimize/run/<id> page.
+
+    We keep it as a separate resource to avoid CSP issues with inline scripts.
+    """
+
+    # run_id is already validated by route/query, but keep it simple.
+    run_id_safe = run_id.replace("\\", "").replace("\"", "").replace("'", "")
+    return f"""(function(){{
+  const runId = "{run_id_safe}";
+  const elStatus = document.getElementById('status');
+  const elBest = document.getElementById('best');
+  const elLog = document.getElementById('log');
+  if (!elStatus || !elBest || !elLog) return;
+
+  function fmtSec(s){{
+    const x = Number(s || 0);
+    return x.toFixed(1);
+  }}
+
+  async function tick(){{
+    try {{
+      const r = await fetch(`/api/optimize/status?run_id=${{encodeURIComponent(runId)}}`, {{ cache: 'no-store' }});
+      const j = await r.json();
+      elStatus.textContent = `status=${{j.status}}  trial=${{j.trial || 0}}/${{j.trials || 0}}  elapsed=${{fmtSec(j.elapsed_s)}}s`;
+
+      if (j.best_score !== null && j.best_score !== undefined) {{
+        elBest.textContent = JSON.stringify({{ best_score: j.best_score, best_trial: j.best_trial, best_params: j.best_params, best_metrics: j.best_metrics }}, null, 2);
+      }}
+
+      const lines = Array.isArray(j.logs) ? j.logs : (typeof j.logs === 'string' ? j.logs.split(/\n/) : []);
+      elLog.textContent = lines.join('\n');
+
+      if (j.status === 'done' || j.status === 'error') {{
+        clearInterval(timer);
+      }}
+    }} catch (e) {{
+      elStatus.textContent = 'error: ' + (e && e.message ? e.message : e);
+    }}
+  }}
+
+  tick();
+  const timer = setInterval(tick, 1000);
+}})();"""
 
 
 # ------------------------------
@@ -968,6 +989,18 @@ def optimize_index():
 @router.get("/optimize/run/{run_id}", response_class=HTMLResponse)
 def optimize_run(run_id: str):
     return _optimize_run_html(run_id)
+
+
+@router.get("/optimize/run.js")
+def optimize_run_js(run_id: str = Query(...)):
+    """JS bundle for the run page.
+
+    Served as an external script to avoid environments where CSP blocks inline
+    scripts (which would otherwise leave the page stuck on "loading...").
+    """
+
+    js = _optimize_run_js(run_id)
+    return Response(content=js, media_type="application/javascript")
 
 
 @router.post("/api/optimize/start")
@@ -1058,71 +1091,52 @@ async def optimize_start(payload: Dict[str, Any]):
 async def optimize_status(run_id: str = Query(...)):
     from app.main import conn  # noqa: WPS433
 
-    # Use a fresh DB connection for status reads to avoid hangs when the global
-    # connection is busy or in a bad state (e.g., cross-thread usage).
-    try:
-        from app.storage.db import get_conn  # noqa: WPS433
+    # 1) if current worker has it in memory, persist (also updates DB)
+    async with RUN_LOCK:
+        st = RUNS.get(run_id)
+    if st is not None:
+        _persist_throttled(st, force=True, conn=conn)
 
-        db_conn = get_conn()
-    except Exception:
-        db_conn = conn
-
-    try:
-        # 1) if current worker has it in memory, persist (also updates DB)
-        async with RUN_LOCK:
-            st = RUNS.get(run_id)
-        if st is not None:
-            _persist_throttled(st, force=True, conn=db_conn)
-
-        # 2) try filesystem snapshot (works within the same replica)
-        prog_path = _run_dir(run_id) / "progress.json"
-        if prog_path.exists():
-            try:
-                data = json.loads(prog_path.read_text(encoding="utf-8"))
-            except Exception:
-                data = {"run_id": run_id, "status": "unknown"}
-            data["logs"] = _tail_lines(_log_path(run_id), n=200)
-            return data
-
-        # 3) try DB snapshot (works across replicas)
-        # NOTE: do not take _DB_STATE_LOCK here. If another thread is holding the
-        # lock while talking to the DB and the connection is slow, the status
-        # endpoint may appear to "hang" and the UI will stay on "loading...".
+    # 2) try filesystem snapshot (works within the same replica)
+    prog_path = _run_dir(run_id) / "progress.json"
+    if prog_path.exists():
         try:
-            _ensure_opt_run_state_table(db_conn)
-            d = _load_opt_run_state(db_conn, run_id)
-            if d is not None:
-                return d
+            data = json.loads(prog_path.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            data = {"run_id": run_id, "status": "unknown"}
+        data["logs"] = _tail_lines(_log_path(run_id), n=200)
+        return data
 
-        # 4) fallback to memory if present
-        if st is None:
-            return JSONResponse(status_code=404, content={"detail": "run_id not found"})
-        return {
-            "run_id": st.run_id,
-            "status": st.status,
-            "trial": int(st.trials_done),
-            "trials": int(st.cfg.get("trials", 0)) if st.cfg else 0,
-            "elapsed_s": float(max(0.0, (st.finished_at or time.time()) - st.started_at)),
-            "trials_done": int(st.trials_done),
-            "best_score": None if st.best_score == float("-inf") else float(st.best_score),
-            "best_trial": int(st.best_trial or 0),
-            "best_params": st.best_params,
-            "best_metrics": st.best_metrics,
-            "cfg": st.cfg,
-            "error": st.error,
-            "started_at": float(st.started_at),
-            "updated_at": float(time.time()),
-            "logs": list(st.logs),
-        }
-    finally:
-        if db_conn is not conn:
-            try:
-                db_conn.close()
-            except Exception:
-                pass
+    # 3) try DB snapshot (works across replicas)
+    # NOTE: do not take _DB_STATE_LOCK here. If another thread is holding the
+    # lock while talking to the DB and the connection is slow, the status
+    # endpoint may appear to "hang" and the UI will stay on "loading...".
+    try:
+        _ensure_opt_run_state_table(conn)
+        d = _load_opt_run_state(conn, run_id)
+        if d is not None:
+            return d
+    except Exception:
+        pass
 
+    # 4) fallback to memory if present
+    if st is None:
+        return JSONResponse(status_code=404, content={"detail": "run_id not found"})
+    return {
+        "run_id": st.run_id,
+        "status": st.status,
+        "trial": int(st.trials_done),
+        "trials": int(st.cfg.get("trials", 0)) if st.cfg else 0,
+        "elapsed_s": float(max(0.0, (st.finished_at or time.time()) - st.started_at)),
+        "trials_done": int(st.trials_done),
+        "best_score": None if st.best_score == float("-inf") else st.best_score,
+        "best_trial": int(st.best_trial),
+        "best_params": st.best_params,
+        "best_metrics": st.best_metrics,
+        "cfg": st.cfg,
+        "error": st.error,
+        "logs": list(st.logs),
+    }
 
 
 @router.post("/api/optimize/clear")

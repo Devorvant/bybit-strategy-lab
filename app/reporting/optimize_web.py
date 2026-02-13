@@ -6,7 +6,6 @@ import html
 import json
 import time
 import uuid
-import traceback
 import os
 from pathlib import Path
 import threading
@@ -19,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from app.config import settings
 from app.storage.db import load_bars
 
-from app.backtest.strategy3_backtest_tv_like import backtest_strategy3_tv_like as backtest_strategy3
+from app.backtest.strategy3_backtest import backtest_strategy3
 
 
 router = APIRouter()
@@ -120,17 +119,13 @@ def persist_log(run_id: str, msg: str) -> None:
         _append_line(_run_dir(run_id) / "log.txt", msg)
 
 def _add_log(st: RunState, msg: str) -> None:
-    """Append a human-readable log line for UI + persist to disk."""
-    st.logs.append(msg)
+    _add_log(st, msg)
     if len(st.logs) > 300:
         del st.logs[:-300]
     try:
         persist_log(st.run_id, msg)
     except Exception:
-        # Logging must never break the run
         pass
-    st.updated_at = datetime.now(timezone.utc)
-
 
 def _persist_throttled(st: RunState, *, force: bool = False) -> None:
     # Не пишем в файл слишком часто
@@ -484,9 +479,8 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     except Exception as e:  # pragma: no cover
         run.finished_at = time.time()
         run.status = "error"
-        run.error = f"{type(e).__name__}: {e}"
-        tb = traceback.format_exc()
-        _append_log(run, "ERROR " + run.error + "\n" + tb)
+        run.error = repr(e)
+        run.logs.append("ERROR " + run.error)
         # Persist error summary
         try:
             _ensure_opt_results_table(conn)
@@ -660,18 +654,12 @@ def _optimize_index_html(conn) -> str:
           headers: {{ 'Content-Type': 'application/json' }},
           body: JSON.stringify(payload)
         }});
-        let j = null;
-        try {
-          j = await res.clone().json();
-        } catch (e) {
-          const t = await res.text();
-          j = { detail: t };
-        }
+        const j = await res.json();
         if (!res.ok) {{
           alert(j.detail || 'Failed');
           return;
         }}
-        window.location.href = '/optimize/run/' + j.run_id;
+        window.location.href = `/optimize/run/${{j.run_id}}`;
       }});
     </script>
     """
@@ -706,31 +694,25 @@ def _optimize_run_html(run_id: str) -> str:
     <script>
       async function tick() {{
         let res;
-        try {{
+        try {
           res = await fetch(`/api/optimize/status?run_id={html.escape(run_id)}`);
-        }} catch (e) {{
+        } catch (e) {
           document.getElementById('statusLine').innerText = 'fetch error: ' + (e?.message || e);
           setTimeout(tick, 1000);
           return;
-        }}
-        let j = null;
-        try {
-          j = await res.clone().json();
-        } catch (e) {
-          const t = await res.text();
-          j = { detail: t };
         }
+        const j = await res.json();
         if (!res.ok) {{
           document.getElementById('statusLine').innerText = (j && j.detail) ? j.detail : ('http error ' + res.status);
           setTimeout(tick, 1000);
           return;
         }}
-        document.getElementById('statusLine').innerText = 'status=' + j.status + ' trials_done=' + j.trials_done + ' best_score=' + (j.best_score ?? '');
+        document.getElementById('statusLine').innerText = `status=${{j.status}} trials_done=${{j.trials_done}} best_score=${{j.best_score ?? ''}}`;
         const best = {{
           best_score: j.best_score,
           best_trial: j.best_trial,
           best_params: j.best_params,
-          best_metrics: j.best_metrics,
+          best_metrics: j.best_metricss,
           cfg: j.cfg,
           error: j.error
         }};

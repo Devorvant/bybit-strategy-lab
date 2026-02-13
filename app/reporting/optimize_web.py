@@ -47,9 +47,6 @@ class RunState:
     logs: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=400))
     error: Optional[str] = None
 
-    # DB connection (runtime only; not serialized)
-    conn: Any = field(default=None, repr=False, compare=False)
-
 
 RUNS: Dict[str, RunState] = {}
 
@@ -103,45 +100,31 @@ def _tail_lines(path: Path, n: int = 200, max_bytes: int = 200_000) -> List[str]
     ls = text.splitlines()
     return ls[-n:]
 
-def persist_state(st: RunState) -> Dict[str, Any]:
-    """Persist current state (best effort) to /tmp and to DB (if available).
-
-    Returns the dict that was persisted.
-    """
-
+def persist_state(st: RunState) -> None:
+    # Минимальное состояние (без массивов баров и т.п.)
+    trials_total = int(st.cfg.get("trials", 0)) if st.cfg else 0
+    now = time.time()
+    elapsed = (st.finished_at or now) - st.started_at if st.started_at else 0.0
     d: Dict[str, Any] = {
         "run_id": st.run_id,
         "status": st.status,
-        "trials_done": st.trials_done,
+        # UI expects these field names:
+        "trial": int(st.trials_done),
+        "trials": trials_total,
+        "elapsed_s": float(max(0.0, elapsed)),
+        # legacy/backward compatible fields:
+        "trials_done": int(st.trials_done),
         "best_score": None if st.best_score == float("-inf") else st.best_score,
-        "best_trial": st.best_trial,
+        "best_trial": int(st.best_trial),
         "best_params": st.best_params,
         "best_metrics": st.best_metrics,
         "cfg": st.cfg,
         "error": st.error,
-        "started_at": st.started_at,
-        "updated_at": time.time(),
-        # logs: store small tail so any replica can show progress
-        "logs": list(st.logs),
+        "started_at": float(st.started_at),
+        "updated_at": now,
     }
-
-    # 1) local file (works across worker processes on the same instance)
-    try:
-        with _lock_for(st.run_id):
-            _atomic_write_json(_run_dir(st.run_id) / "progress.json", d)
-    except Exception:
-        pass
-
-    # 2) DB row (works across replicas)
-    conn = getattr(st, "conn", None)
-    if conn is not None:
-        try:
-            _upsert_opt_run_state(conn, st.run_id, d)
-        except Exception:
-            # Do not crash optimizer because of persistence issues
-            pass
-
-    return d
+    with _lock_for(st.run_id):
+        _atomic_write_json(_run_dir(st.run_id) / "progress.json", d)
 
 def persist_log(run_id: str, msg: str) -> None:
     with _lock_for(run_id):
@@ -162,16 +145,58 @@ def _add_log(st: RunState, msg: str) -> None:
         # Never fail the optimizer because of logging.
         pass
 
-def _persist_throttled(st: RunState, *, force: bool = False) -> None:
-    # Не пишем в файл слишком часто
+_DB_STATE_LOCK = threading.Lock()
+
+
+def _persist_throttled(st: RunState, *, force: bool = False, conn=None) -> None:
+    """Persist progress snapshots.
+
+    - Always writes a small JSON snapshot to /tmp (fast, per-replica)
+    - When DB connection is provided, also upserts into opt_run_state so that
+      progress is visible across Railway replicas.
+    """
+
     now = time.time()
     last = getattr(st, "_last_persist", 0.0)
-    if force or (now - last) >= 1.0 or (st.trials_done % 10 == 0):
-        try:
-            persist_state(st)
-            setattr(st, "_last_persist", now)
-        except Exception:
-            pass
+    if not (force or (now - last) >= 1.0 or (st.trials_done % 10 == 0)):
+        return
+
+    try:
+        persist_state(st)
+        setattr(st, "_last_persist", now)
+    except Exception:
+        pass
+
+    if conn is None:
+        return
+
+    # /tmp is not shared between replicas; keep DB snapshot updated.
+    try:
+        payload = json.loads((_run_dir(st.run_id) / "progress.json").read_text(encoding="utf-8"))
+    except Exception:
+        payload = {
+            "run_id": st.run_id,
+            "status": st.status,
+            "trial": int(st.trials_done),
+            "trials": int(st.cfg.get("trials", 0)) if st.cfg else 0,
+            "elapsed_s": float(max(0.0, (st.finished_at or now) - st.started_at)),
+            "best_score": None if st.best_score == float("-inf") else st.best_score,
+            "best_trial": int(st.best_trial),
+            "best_params": st.best_params,
+            "best_metrics": st.best_metrics,
+            "cfg": st.cfg,
+            "error": st.error,
+            "started_at": float(st.started_at),
+            "updated_at": now,
+        }
+
+    try:
+        with _DB_STATE_LOCK:
+            _ensure_opt_run_state_table(conn)
+            _upsert_opt_run_state(conn, st.run_id, payload, list(st.logs))
+    except Exception:
+        # Never fail optimizer due to persistence.
+        pass
 RUN_LOCK = asyncio.Lock()
 
 
@@ -238,97 +263,6 @@ def _ensure_opt_results_table(conn) -> None:
     else:
         conn.executescript(ddl_sqlite)
         conn.commit()
-
-
-# ------------------------------
-# DB helpers (progress / cross-replica state)
-# ------------------------------
-
-
-def _ensure_opt_run_state_table(conn) -> None:
-    """Table for optimizer *progress* (one row per run_id).
-
-    This is important on Railway when you can have multiple replicas/worker processes: local
-    filesystem in /tmp is not shared across replicas, but Postgres is.
-    """
-
-    ddl_pg = """
-    CREATE TABLE IF NOT EXISTS opt_run_state (
-      run_id TEXT PRIMARY KEY,
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      data JSONB
-    );
-    """
-
-    ddl_sqlite = """
-    CREATE TABLE IF NOT EXISTS opt_run_state (
-      run_id TEXT PRIMARY KEY,
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      data TEXT
-    );
-    """
-
-    if _is_postgres():
-        try:
-            with conn.cursor() as cur:
-                for stmt in [st.strip() for st in ddl_pg.split(';') if st.strip()]:
-                    cur.execute(stmt + ';')
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-    else:
-        conn.executescript(ddl_sqlite)
-        conn.commit()
-
-
-def _upsert_opt_run_state(conn, run_id: str, data: Dict[str, Any]) -> None:
-    if _is_postgres():
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO opt_run_state(run_id, updated_at, data)
-                    VALUES(%s, now(), %s)
-                    ON CONFLICT(run_id) DO UPDATE SET updated_at = now(), data = EXCLUDED.data
-                    """,
-                    (run_id, json.dumps(data, ensure_ascii=False)),
-                )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-    else:
-        conn.execute(
-            """
-            INSERT INTO opt_run_state(run_id, updated_at, data)
-            VALUES(?, datetime('now'), ?)
-            ON CONFLICT(run_id) DO UPDATE SET updated_at=datetime('now'), data=excluded.data
-            """,
-            (run_id, json.dumps(data, ensure_ascii=False)),
-        )
-        conn.commit()
-
-
-def _load_opt_run_state(conn, run_id: str) -> Optional[Dict[str, Any]]:
-    try:
-        _ensure_opt_run_state_table(conn)
-    except Exception:
-        return None
-
-    if _is_postgres():
-        with conn.cursor() as cur:
-            cur.execute('SELECT data FROM opt_run_state WHERE run_id=%s', (run_id,))
-            row = cur.fetchone()
-            if not row:
-                return None
-            return json.loads(row[0]) if isinstance(row[0], str) else row[0]
-    else:
-        cur = conn.execute('SELECT data FROM opt_run_state WHERE run_id=?', (run_id,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        return json.loads(row[0]) if isinstance(row[0], str) else row[0]
 
 
 def _insert_opt_result(
@@ -438,47 +372,157 @@ def _load_last_results(conn, limit: int = 30) -> List[Dict[str, Any]]:
 
 
 # ------------------------------
+# DB helpers (cross-replica progress)
+# ------------------------------
+
+
+def _ensure_opt_run_state_table(conn) -> None:
+    """Create opt_run_state table if missing.
+
+    /tmp is NOT shared between Railway replicas. We keep a latest snapshot in DB
+    (one row per run_id) so that /optimize/run/<id> can always show progress.
+    """
+
+    ddl_pg = """
+    CREATE TABLE IF NOT EXISTS opt_run_state (
+      run_id TEXT PRIMARY KEY,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      payload JSONB,
+      logs TEXT
+    );
+    CREATE INDEX IF NOT EXISTS opt_run_state_updated_at_idx ON opt_run_state(updated_at DESC);
+    """
+
+    ddl_sqlite = """
+    CREATE TABLE IF NOT EXISTS opt_run_state (
+      run_id TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL,
+      payload TEXT,
+      logs TEXT
+    );
+    """
+
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                for stmt in [s.strip() for s in ddl_pg.split(";") if s.strip()]:
+                    cur.execute(stmt + ";")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        conn.executescript(ddl_sqlite)
+        conn.commit()
+
+
+def _upsert_opt_run_state(conn, run_id: str, payload: Dict[str, Any], logs: List[str]) -> None:
+    logs_txt = "\n".join(logs[-400:])
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO opt_run_state(run_id, updated_at, payload, logs)
+                    VALUES(%s, now(), %s, %s)
+                    ON CONFLICT (run_id) DO UPDATE
+                      SET updated_at = now(),
+                          payload = EXCLUDED.payload,
+                          logs = EXCLUDED.logs
+                    """,
+                    (run_id, json.dumps(payload), logs_txt),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO opt_run_state(run_id, updated_at, payload, logs)
+            VALUES(?, datetime('now'), ?, ?)
+            """,
+            (run_id, json.dumps(payload), logs_txt),
+        )
+        conn.commit()
+
+
+def _load_opt_run_state(conn, run_id: str) -> Optional[Dict[str, Any]]:
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute("SELECT payload, logs, updated_at FROM opt_run_state WHERE run_id=%s", (run_id,))
+            row = cur.fetchone()
+    else:
+        cur = conn.execute("SELECT payload, logs, updated_at FROM opt_run_state WHERE run_id=?", (run_id,))
+        row = cur.fetchone()
+
+    if not row:
+        return None
+
+    payload_raw = row[0]
+    logs_txt = row[1] or ""
+    try:
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+    except Exception:
+        payload = {"run_id": run_id, "status": "unknown"}
+
+    payload["logs"] = [ln for ln in str(logs_txt).splitlines() if ln.strip()]
+    payload["updated_at"] = str(row[2])
+    return payload
+
+
+# ------------------------------
 # Optimizer core
 # ------------------------------
 
 
-def _equity_metrics(equity: List[float]) -> Dict[str, float]:
-    if not equity or len(equity) < 2:
+def _equity_metrics(pnl_curve: List[float], base: float) -> Dict[str, float]:
+    """Compute metrics from cumulative PnL curve.
+
+    Strategy3 backtest returns equity as cumulative PnL in USD (starts near 0).
+    For meaningful returns/DD we convert to *total equity* = base + pnl.
+    """
+
+    if base <= 0:
+        base = 1.0
+
+    if not pnl_curve or len(pnl_curve) < 2:
         return {"ret": 0.0, "dd": 0.0, "vol": 0.0, "sharpe": 0.0}
-    ret = (equity[-1] / equity[0]) - 1.0 if equity[0] != 0 else 0.0
+
+    equity = [base + float(x) for x in pnl_curve]
+    ret = (equity[-1] / base) - 1.0
+
     peak = equity[0]
     max_dd = 0.0
     for v in equity:
         if v > peak:
             peak = v
-        # If peak is zero (common if equity starts from 0), avoid division by zero.
-        if peak > 0:
-            dd = (v / peak) - 1.0
-        else:
-            dd = 0.0
+        if peak <= 0:
+            continue
+        dd = (v / peak) - 1.0
         if dd < max_dd:
             max_dd = dd
     dd_abs = abs(max_dd)
-    # log returns
+
+    import math
+
     rs: List[float] = []
     for i in range(1, len(equity)):
         if equity[i - 1] > 0 and equity[i] > 0:
-            rs.append((equity[i] / equity[i - 1]))
-    if len(rs) < 2:
-        return {"ret": ret, "dd": dd_abs, "vol": 0.0, "sharpe": 0.0}
-    import math
+            rs.append(equity[i] / equity[i - 1])
 
-    log_r = [math.log(x) for x in rs]
-    # Need at least 2 return observations to compute sample stdev
+    if len(rs) < 2:
+        return {"ret": float(ret), "dd": float(dd_abs), "vol": 0.0, "sharpe": 0.0}
+
+    log_r = [math.log(x) for x in rs if x > 0]
     if len(log_r) < 2:
-        vol = 0.0
-        sharpe = 0.0
-    else:
-        mean_r = sum(log_r) / len(log_r)
-        var = sum((x - mean_r) ** 2 for x in log_r) / (len(log_r) - 1)
-        vol = math.sqrt(var) if var > 0 else 0.0
-        sharpe = 0.0 if vol == 0 else (mean_r / vol) * math.sqrt(len(log_r))
-    return {"ret": ret, "dd": dd_abs, "vol": vol, "sharpe": sharpe}
+        return {"ret": float(ret), "dd": float(dd_abs), "vol": 0.0, "sharpe": 0.0}
+
+    mean_r = sum(log_r) / len(log_r)
+    var = sum((x - mean_r) ** 2 for x in log_r) / (len(log_r) - 1)
+    vol = math.sqrt(var) if var > 0 else 0.0
+    sharpe = 0.0 if vol == 0 else (mean_r / vol) * math.sqrt(len(log_r))
+    return {"ret": float(ret), "dd": float(dd_abs), "vol": float(vol), "sharpe": float(sharpe)}
 
 
 def _score(m: Dict[str, float], trades: int, weights: Dict[str, float], min_trades: int) -> float:
@@ -546,7 +590,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     run.status = "running"
     _add_log(run, f"RUN_START run_id={run.run_id} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}")
     # Make sure the run page can show status even if it is served by another worker.
-    _persist_throttled(run, force=True)
+    _persist_throttled(run, force=True, conn=conn)
 
     try:
         for trial in range(1, trials + 1):
@@ -557,12 +601,12 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
             params = _sample_params(rng, position_usd)
             _, va_bars = _train_val_split(bars, train_frac)
             bt = backtest_strategy3(va_bars, **params)
-            m = _equity_metrics(bt.equity)
+            m = _equity_metrics(bt.equity, base=position_usd)
             trades = len(bt.trades)
             s = _score(m, trades, weights, min_trades)
 
             run.trials_done = trial
-            _persist_throttled(run)
+            _persist_throttled(run, conn=conn)
 
             if s > run.best_score:
                 run.best_score = s
@@ -589,7 +633,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
 
         run.finished_at = time.time()
         run.status = "done"
-        _persist_throttled(run, force=True)
+        _persist_throttled(run, force=True, conn=conn)
 
         dur = run.finished_at - run.started_at
         _add_log(
@@ -601,7 +645,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
         if run.best_metrics:
             _add_log(run, "BEST_METRICS " + json.dumps(run.best_metrics, ensure_ascii=False))
 
-        _persist_throttled(run, force=True)
+        _persist_throttled(run, force=True, conn=conn)
 
         # Persist ONLY final result
         _ensure_opt_results_table(conn)
@@ -624,7 +668,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
         run.status = "error"
         run.error = repr(e)
         _add_log(run, "ERROR " + run.error)
-        _persist_throttled(run, force=True)
+        _persist_throttled(run, force=True, conn=conn)
         # Persist error summary
         try:
             _ensure_opt_results_table(conn)
@@ -776,7 +820,13 @@ def _optimize_index_html(conn) -> str:
     </div>
 
     <div class='card'>
-      <div style='font-weight:700;margin-bottom:8px;'>Saved results (final only)</div>
+      <div style='display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px;'>
+        <div style='font-weight:700;'>Saved results (final only)</div>
+        <div class='row' style='gap:8px;'>
+          <button type='button' id='btnClearErrors' style='background:#22315c;'>Clear errors</button>
+          <button type='button' id='btnClearAll' style='background:#5c2b2b;'>Clear all</button>
+        </div>
+      </div>
       <table>
         <thead><tr>
           <th>created</th><th>symbol</th><th>tf</th><th>status</th><th>trials</th><th>best_score</th><th>best_params</th><th>best_metrics</th>
@@ -805,6 +855,29 @@ def _optimize_index_html(conn) -> str:
         }}
         window.location.href = `/optimize/run/${{j.run_id}}`;
       }});
+
+      async function clearResults(mode) {{
+        const ok = (mode === 'all')
+          ? confirm('Очистить ВСЕ результаты оптимизации?')
+          : confirm('Очистить только error результаты?');
+        if (!ok) return;
+        const res = await fetch('/api/optimize/clear', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ mode }})
+        }});
+        const j = await res.json();
+        if (!res.ok) {{
+          alert(j.detail || 'Failed');
+          return;
+        }}
+        window.location.reload();
+      }}
+
+      const btnErr = document.getElementById('btnClearErrors');
+      const btnAll = document.getElementById('btnClearAll');
+      if (btnErr) btnErr.addEventListener('click', () => clearResults('errors'));
+      if (btnAll) btnAll.addEventListener('click', () => clearResults('all'));
     </script>
     """
 
@@ -940,8 +1013,9 @@ async def optimize_start(payload: Dict[str, Any]):
     }
 
     state = RunState(run_id=run_id, cfg=cfg)
-    state.conn = conn
     persist_state(state)
+    # Persist initial snapshot to DB so that the run page works across replicas.
+    _persist_throttled(state, force=True, conn=conn)
     async with RUN_LOCK:
         RUNS[run_id] = state
 
@@ -956,64 +1030,82 @@ async def optimize_start(payload: Dict[str, Any]):
 
 @router.get("/api/optimize/status")
 async def optimize_status(run_id: str = Query(...)):
-    """Return optimizer progress.
-
-    We try, in order:
-      1) in-memory state (same worker)
-      2) /tmp progress.json (same instance)
-      3) Postgres/SQLite table opt_run_state (works across replicas)
-    """
-
     from app.main import conn  # noqa: WPS433
 
-    # 1) if current worker has it in memory, persist to file+db (helps others)
+    # 1) if current worker has it in memory, persist (also updates DB)
     async with RUN_LOCK:
         st = RUNS.get(run_id)
     if st is not None:
-        _persist_throttled(st, force=True)
+        _persist_throttled(st, force=True, conn=conn)
 
-    data: Optional[Dict[str, Any]] = None
-
-    # 2) filesystem
+    # 2) try filesystem snapshot (works within the same replica)
     prog_path = _run_dir(run_id) / "progress.json"
     if prog_path.exists():
         try:
             data = json.loads(prog_path.read_text(encoding="utf-8"))
         except Exception:
-            data = None
+            data = {"run_id": run_id, "status": "unknown"}
+        data["logs"] = _tail_lines(_log_path(run_id), n=200)
+        return data
 
-    # 3) DB row (important when filesystem isn't shared)
-    if data is None:
-        data = _load_opt_run_state(conn, run_id)
+    # 3) try DB snapshot (works across replicas)
+    try:
+        with _DB_STATE_LOCK:
+            _ensure_opt_run_state_table(conn)
+            d = _load_opt_run_state(conn, run_id)
+        if d is not None:
+            return d
+    except Exception:
+        pass
 
-    if data is None and st is None:
+    # 4) fallback to memory if present
+    if st is None:
         return JSONResponse(status_code=404, content={"detail": "run_id not found"})
-
-    if data is None and st is not None:
-        data = persist_state(st)
-
-    cfg = (data or {}).get("cfg") or {}
-    trials_total = int(cfg.get("trials") or 0)
-    trials_done = int((data or {}).get("trials_done") or 0)
-    started_at = float((data or {}).get("started_at") or time.time())
-    elapsed_s = int(max(0.0, time.time() - started_at))
-
-    # Provide a stable API for the UI
-    out = {
-        "run_id": run_id,
-        "status": (data or {}).get("status") or (st.status if st else "unknown"),
-        "trial": trials_done,
-        "trials": trials_total,
-        "elapsed_s": elapsed_s,
-        "best_score": (data or {}).get("best_score"),
-        "best_params": (data or {}).get("best_params"),
-        "best_metrics": (data or {}).get("best_metrics"),
-        "best_trial": (data or {}).get("best_trial"),
-        "error": (data or {}).get("error"),
-        "logs": (data or {}).get("logs") or [],
-        # Keep the full payload for debugging/compat
-        "cfg": cfg,
-        "trials_done": trials_done,
-        "updated_at": (data or {}).get("updated_at"),
+    return {
+        "run_id": st.run_id,
+        "status": st.status,
+        "trial": int(st.trials_done),
+        "trials": int(st.cfg.get("trials", 0)) if st.cfg else 0,
+        "elapsed_s": float(max(0.0, (st.finished_at or time.time()) - st.started_at)),
+        "trials_done": int(st.trials_done),
+        "best_score": None if st.best_score == float("-inf") else st.best_score,
+        "best_trial": int(st.best_trial),
+        "best_params": st.best_params,
+        "best_metrics": st.best_metrics,
+        "cfg": st.cfg,
+        "error": st.error,
+        "logs": list(st.logs),
     }
-    return out
+
+
+@router.post("/api/optimize/clear")
+async def optimize_clear(payload: Dict[str, Any]):
+    """Clear saved opt_results.
+
+    payload: {"mode": "errors"|"all"}
+    """
+
+    from app.main import conn  # noqa: WPS433
+
+    mode = str(payload.get("mode", "errors")).lower().strip()
+    _ensure_opt_results_table(conn)
+
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                if mode == "all":
+                    cur.execute("TRUNCATE TABLE opt_results;")
+                else:
+                    cur.execute("DELETE FROM opt_results WHERE status='error';")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        if mode == "all":
+            conn.execute("DELETE FROM opt_results;")
+        else:
+            conn.execute("DELETE FROM opt_results WHERE status='error';")
+        conn.commit()
+
+    return {"ok": True, "mode": mode}

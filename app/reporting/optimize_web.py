@@ -1014,14 +1014,37 @@ async def optimize_start(payload: Dict[str, Any]):
 
     state = RunState(run_id=run_id, cfg=cfg)
     persist_state(state)
-    # Persist initial snapshot to DB so that the run page works across replicas.
+    # Ensure DB table for cross-replica progress is ready and persist
+    # an initial snapshot so that the run page works across Railway replicas.
+    try:
+        _ensure_opt_run_state_table(conn)
+    except Exception:
+        # Don't fail start if table init fails; status endpoint will fall back.
+        pass
     _persist_throttled(state, force=True, conn=conn)
     async with RUN_LOCK:
         RUNS[run_id] = state
 
     # Run in background thread to avoid blocking FastAPI event loop
     async def _bg():
-        await asyncio.to_thread(_run_optimizer_sync, state, bars, conn)
+        # IMPORTANT: don't share the global DB connection across threads.
+        # psycopg2 connections are not thread-safe; sharing can cause hangs that
+        # look like the run page being stuck on "loading...".
+        try:
+            from app.storage.db import get_conn  # noqa: WPS433
+
+            thread_conn = get_conn()
+        except Exception:
+            thread_conn = conn
+
+        try:
+            await asyncio.to_thread(_run_optimizer_sync, state, bars, thread_conn)
+        finally:
+            try:
+                if thread_conn is not conn:
+                    thread_conn.close()
+            except Exception:
+                pass
 
     asyncio.create_task(_bg())
 
@@ -1049,10 +1072,12 @@ async def optimize_status(run_id: str = Query(...)):
         return data
 
     # 3) try DB snapshot (works across replicas)
+    # NOTE: do not take _DB_STATE_LOCK here. If another thread is holding the
+    # lock while talking to the DB and the connection is slow, the status
+    # endpoint may appear to "hang" and the UI will stay on "loading...".
     try:
-        with _DB_STATE_LOCK:
-            _ensure_opt_run_state_table(conn)
-            d = _load_opt_run_state(conn, run_id)
+        _ensure_opt_run_state_table(conn)
+        d = _load_opt_run_state(conn, run_id)
         if d is not None:
             return d
     except Exception:

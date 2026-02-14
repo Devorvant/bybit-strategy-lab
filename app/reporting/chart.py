@@ -674,6 +674,14 @@ def make_chart_html(
     .pnl-neg {{ color: #fb7185; }}
     .reason-stop {{ color: #fbbf24; }}
     .reason {{ opacity: 0.9; }}
+
+    .navlink {{ display:inline-block; text-decoration:none; background:#0e1830; border:1px solid #1b2940; color:#e6e6e6; padding: 7px 10px; border-radius: 999px; font-weight: 700; }}
+    .navlink.active {{ background:#1b5cff33; border-color:#2b6dff; }}
+    @media (max-width: 760px) {{
+      .topbar label {{ font-size: 12px; }}
+      select, input {{ flex: 1 1 140px; }}
+      .apply {{ width: 100%; }}
+    }}
   </style>
   <script>
     function setTf(tf) {{
@@ -684,6 +692,8 @@ def make_chart_html(
 </head>
 <body>
   <form id="chartForm" class="topbar" method="get" action="/chart">
+    <a class="navlink active" href="/chart?symbol={html.escape(symbol)}&tf={tf_e}&strategy={html.escape(strategy)}&limit={int(limit)}">📈 Chart</a>
+    <a class="navlink" href="/optimize">🧪 Optimizer</a>
     <label>Symbol</label>
     <select name="symbol">{symbol_options}</select>
 

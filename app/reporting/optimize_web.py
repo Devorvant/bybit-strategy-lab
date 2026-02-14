@@ -826,8 +826,9 @@ def _page_shell(title: str, body: str, head_extra: str = "") -> str:
         <div style='font-size:20px; font-weight:700;'>{html.escape(title)}</div>
         <div class='muted' style='margin-top:4px;'>Оптимизация Strategy 3 (2h). Итерации показываем в вебе, в Postgres сохраняем только итог.</div>
       </div>
-      <div>
-        <a href='/chart'>Chart</a>
+      <div class='topnav'>
+        <a class='btn ghost' href='/chart'>📈 Chart</a>
+        <a class='btn primary' href='/optimize'>🧪 Optimizer</a>
       </div>
     </div>
     {body}
@@ -877,6 +878,59 @@ def _optimize_index_html(conn) -> str:
                 f"<td class='muted'>{html.escape(str(bm)[:140]) if bm else ''}</td>",
             ]
         ) + "</tr>"
+
+
+    def _to_dict(x) -> Dict[str, Any]:
+        if x is None:
+            return {}
+        if isinstance(x, dict):
+            return x
+        if isinstance(x, str):
+            try:
+                return json.loads(x)
+            except Exception:
+                return {}
+        return {}
+
+    cards_html = ""
+    for r in last:
+        bm = _to_dict(r.get("best_metrics"))
+        bs = r.get("best_score")
+        bs_str = "" if bs is None else f"{float(bs):.4f}"
+        ret = bm.get("ret")
+        dd = bm.get("dd")
+        trades = bm.get("trades")
+        created = str(r.get("created_at"))
+        symbol = str(r.get("symbol"))
+        tf = str(r.get("tf"))
+        status = str(r.get("status"))
+        rid = int(r.get("id")) if r.get("id") is not None else 0
+
+        parts = []
+        if bs is not None:
+            parts.append(f"score={float(bs):.2f}")
+        if isinstance(ret, (int, float)):
+            parts.append(f"ret={ret*100:+.1f}%")
+        if isinstance(dd, (int, float)):
+            parts.append(f"dd={dd*100:.1f}%")
+        if isinstance(trades, (int, float)):
+            parts.append(f"trades={int(trades)}")
+
+        chart_href = f"/chart?symbol={html.escape(symbol)}&tf={html.escape(tf)}&strategy=my_strategy3.py&opt_id={rid}"
+        cards_html += f"""
+        <div class='card result-card'>
+          <div style='display:flex; justify-content:space-between; gap:10px; align-items:flex-start;'>
+            <div>
+              <div style='font-weight:800;'>#{rid} {html.escape(created)}</div>
+              <div class='muted' style='margin-top:4px;'>{html.escape(symbol)} tf={html.escape(tf)} · <span class='pill'>{html.escape(status)}</span></div>
+              <div class='muted' style='margin-top:6px;'>{html.escape(" ".join(parts))}</div>
+            </div>
+            <div style='display:flex; flex-direction:column; gap:8px; align-items:flex-end;'>
+              <a class='btn ghost' href='{chart_href}'>Open chart</a>
+            </div>
+          </div>
+        </div>
+        """
 
     body = f"""
     <div class='card'>
@@ -936,6 +990,10 @@ def _optimize_index_html(conn) -> str:
           {rows_html if rows_html else "<tr><td colspan='8' class='muted'>No results yet.</td></tr>"}
         </tbody>
       </table>
+    </div>
+
+    <div class='results-cards'>
+      {cards_html if cards_html else "<div class='card'><div class='muted'>No results yet.</div></div>"}
     </div>
 
     <script>
@@ -1025,7 +1083,7 @@ def _optimize_run_html(run_id: str) -> str:
             <div class="muted">Оптимизация Strategy 3 (2h). Итерации показываем в вебе, в Postgres сохраняем только итог.</div>
           </div>
           <div class="row">
-            <a class="btn" href="/chart">Chart</a>
+            <a class="btn ghost" href="/chart">📈 Chart</a>
           </div>
         </div>
 
@@ -1035,7 +1093,7 @@ def _optimize_run_html(run_id: str) -> str:
               <div class="muted">run_id:</div>
               <div><span class="pill">{run_id_safe}</span></div>
             </div>
-            <div><a class="btn" href="/optimize">← back</a></div>
+            <div><a class="btn" href="/optimize">← Optimizer</a></div>
           </div>
           <div style="height:8px"></div>
           <div class="muted">run_id не найден. Возможно, оптимизация уже завершилась, а запись о прогрессе была очищена. Проверь список результатов на странице /optimize.</div>
@@ -1076,7 +1134,7 @@ def _optimize_run_html(run_id: str) -> str:
         <div class="muted">Оптимизация Strategy 3 (2h). Итерации показываем в вебе, в Postgres сохраняем только итог.</div>
       </div>
       <div class="row">
-        <a class="btn" href="/chart">Chart</a>
+        <a class="btn ghost" href="/chart">📈 Chart</a>
       </div>
     </div>
 
@@ -1086,7 +1144,7 @@ def _optimize_run_html(run_id: str) -> str:
           <div class="muted">run_id:</div>
           <div><span class="pill">{run_id_safe}</span></div>
         </div>
-        <div><a class="btn" href="/optimize">← back</a></div>
+        <div><a class="btn" href="/optimize">← Optimizer</a></div>
       </div>
       <div style="height:8px"></div>
       <div class="muted">status={html.escape(status)} trial={trial}/{trials} elapsed={elapsed:.1f}s</div>

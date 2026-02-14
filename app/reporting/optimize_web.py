@@ -630,6 +630,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     import random
 
     cfg = run.cfg
+    cfg.setdefault("select_on", "train")
     symbol = cfg["symbol"]
     tf = cfg["tf"]
     trials = int(cfg["trials"])
@@ -649,6 +650,10 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     }
 
     rng = random.Random(seed)
+
+    train_bars, va_bars = _train_val_split(bars, train_frac)
+    # Classical scheme: choose params by TRAIN score, report metrics on VAL (future chunk).
+    best_train_score = float("-inf")
     t0 = time.time()
     no_improve = 0
 
@@ -664,25 +669,46 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                 break
 
             params = _sample_params(rng, position_usd)
-            _, va_bars = _train_val_split(bars, train_frac)
-            bt = backtest_strategy3(va_bars, **params)
-            m = _equity_metrics(bt.equity, base=position_usd)
-            trades = len(bt.trades)
-            s = _score(m, trades, weights, min_trades)
+
+            # 1) Evaluate on TRAIN (used for selection).
+            bt_tr = backtest_strategy3(train_bars, **params)
+            m_tr = _equity_metrics(bt_tr.equity, base=position_usd)
+            trades_tr = len(bt_tr.trades)
+            s_tr = _score(m_tr, trades_tr, weights, min_trades)
+
+            # 2) Evaluate on VAL only when a new TRAIN-best is found (reporting).
+            m = None
+            trades = 0
+            s = float('-inf')
 
             run.trials_done = trial
             _persist_throttled(run, conn=conn)
 
-            if s > run.best_score:
-                run.best_score = s
+            if s_tr > best_train_score:
+                best_train_score = s_tr
+
+                # Report on VAL (future chunk) for the new TRAIN-best candidate.
+                bt_va = backtest_strategy3(va_bars, **params)
+                m_va = _equity_metrics(bt_va.equity, base=position_usd)
+                trades_va = len(bt_va.trades)
+                s_va = _score(m_va, trades_va, weights, min_trades)
+
+                run.best_score = s_va
                 run.best_params = params
                 run.best_trial = trial
-                run.best_metrics = {**m, "trades": trades, "val_score": s}
+                run.best_metrics = {
+                    **m_va,
+                    "trades": trades_va,
+                    "val_score": s_va,
+                    "train_score": s_tr,
+                    "train_metrics": {**m_tr, "trades": trades_tr},
+                }
                 no_improve = 0
                 _add_log(
                     run,
-                    f"[{trial}/{trials}] best={run.best_score:.6f} (trial={run.best_trial}) "
-                    f"ret={m['ret']:.4f} dd={m['dd']:.4f} sharpe={m['sharpe']:.3f} trades={trades} "
+                    f"[{trial}/{trials}] best_val={s_va:.6f} (train_best={s_tr:.6f}, trial={trial}) "
+                    f"VAL ret={m_va['ret']:.4f} dd={m_va['dd']:.4f} sharpe={m_va['sharpe']:.3f} trades={trades_va} "
+                    f"TRAIN ret={m_tr['ret']:.4f} dd={m_tr['dd']:.4f} sharpe={m_tr['sharpe']:.3f} trades={trades_tr} "
                     f"st_factor={params['st_factor']:.2f} adx_nt<{params['adx_no_trade_below']:.1f} atr_mult={params['atr_mult']:.2f} cooldown={params['rev_cooldown_hrs']}h"
                 )
             else:
@@ -695,6 +721,15 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
             if patience and no_improve >= patience:
                 _add_log(run, f"EARLY_STOP patience={patience} reached at trial={trial} best_trial={run.best_trial}")
                 break
+
+        # Compute FULL-window metrics for the chosen params (for later chart comparison).
+        if run.best_params:
+            bt_full = backtest_strategy3(bars, **run.best_params)
+            m_full = _equity_metrics(bt_full.equity, base=position_usd)
+            trades_full = len(bt_full.trades)
+            if run.best_metrics is None:
+                run.best_metrics = {}
+            run.best_metrics["full_metrics"] = {**m_full, "trades": trades_full}
 
         run.finished_at = time.time()
         run.status = "done"

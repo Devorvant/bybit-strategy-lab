@@ -736,9 +736,12 @@ def make_chart_html(
             sel = "selected" if (opt_id is not None and int(opt_id) == int(rid)) else ""
             opt_opts.append(f"<option value='{int(rid)}' {sel}>{label}</option>")
 
+        # Put the tail controls (Last/Limit/Apply) onto the next line so they
+        # don't get pushed far to the right on wide screens.
         opt_controls_html = f"""
         <label>Optimized</label>
         <select name="opt_id" title="Load optimized parameters">{''.join(opt_opts)}</select>
+        <span class="flex-break"></span>
         <label>Last</label>
         <input name="opt_last" value="{int(opt_last)}" style="width:70px" title="How many recent results to show"/>
         """
@@ -752,7 +755,8 @@ def make_chart_html(
   <title>Chart</title>
   <style>
     body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #0b1220; color: #e6e6e6; }}
-    .topbar {{ padding: 10px 14px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #1b2940; position: sticky; top: 0; background: #0b1220; z-index: 10; }}
+    .topbar {{ padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; border-bottom: 1px solid #1b2940; position: sticky; top: 0; background: #0b1220; z-index: 10; }}
+    .flex-break {{ flex-basis: 100%; height: 0; }}
     .topbar label {{ font-size: 13px; opacity: 0.85; }}
     select, input {{ background: #0e1830; color: #e6e6e6; border: 1px solid #1b2940; border-radius: 8px; padding: 7px 10px; outline: none; }}
     .tf-row {{ padding: 10px 14px 0 14px; display: flex; gap: 6px; flex-wrap: wrap; }}

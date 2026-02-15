@@ -517,6 +517,102 @@ def make_chart_html(
 
     plot_html = _build_plot_html(bars, strategy=strategy, strategy_params=opt_params)
 
+    # Build a compact "current params" panel near the chart.
+    # Stage 1: display-only (editable panel comes later).
+    def _current_params_for_strategy() -> dict:
+        if strategy == "my_strategy3.py":
+            base = {
+                "position_usd": 1000.0,
+                "use_no_trade": True,
+                "adx_len": 14,
+                "adx_smooth": 14,
+                "adx_no_trade_below": 14.0,
+                "st_atr_len": 14,
+                "st_factor": 4.0,
+                "use_rev_cooldown": True,
+                "rev_cooldown_hrs": 8,
+                "use_flip_limit": False,
+                "max_flips_per_day": 6,
+                "use_emergency_sl": True,
+                "atr_len": 14,
+                "atr_mult": 3.0,
+                "close_at_end": False,
+            }
+        elif strategy == "my_strategy3_tv_like.py":
+            base = {
+                "initial_capital": 10000.0,
+                "percent_of_equity": 50.0,
+                "commission_percent": 0.10,
+                "slippage_ticks": 2,
+                "tick_size": 0.0001,
+                "use_no_trade": True,
+                "adx_len": 14,
+                "adx_smooth": 14,
+                "adx_no_trade_below": 14.0,
+                "st_atr_len": 14,
+                "st_factor": 4.0,
+                "use_rev_cooldown": True,
+                "rev_cooldown_hrs": 8,
+                "use_flip_limit": False,
+                "max_flips_per_day": 6,
+                "use_emergency_sl": True,
+                "atr_len": 14,
+                "atr_mult": 3.0,
+                "close_at_end": False,
+            }
+        elif strategy == "my_strategy2.py":
+            base = {
+                "position_usd": 1000.0,
+                "fast_n": 20,
+                "slow_n": 50,
+                "adx_n": 14,
+                "adx_enter": 20.0,
+                "adx_exit": 15.0,
+                "close_at_end": False,
+            }
+        elif strategy == "my_strategy_tv_like.py":
+            base = {
+                "position_usd": 1000.0,
+                "fast_n": 20,
+                "slow_n": 50,
+                "fee_rate": 0.0,
+                "slippage_bps": 0.0,
+                "close_at_end": False,
+            }
+        else:
+            base = {
+                "position_usd": 1000.0,
+                "fast_n": 20,
+                "slow_n": 50,
+                "close_at_end": False,
+            }
+
+        # Only strategy3 currently accepts opt_params overrides in the chart.
+        if opt_params and strategy == "my_strategy3.py":
+            try:
+                base.update({k: opt_params[k] for k in opt_params.keys()})
+            except Exception:
+                pass
+        return base
+
+    cur_params = _current_params_for_strategy()
+    src_lbl = "defaults"
+    if opt_id:
+        src_lbl = f"optimized #{int(opt_id)}"
+    elif opt_params:
+        src_lbl = "overrides"
+
+    params_items = "".join(
+        f"<div class='p-k'>{html.escape(str(k))}</div><div class='p-v'>{html.escape(str(v))}</div>"
+        for k, v in cur_params.items()
+    )
+    params_html = f"""
+    <div class=\"params-card\">
+      <div class=\"params-head\"><b>Params</b><span class=\"muted\">({html.escape(src_lbl)})</span></div>
+      <div class=\"params-grid\">{params_items}</div>
+    </div>
+    """
+
     # Build trades table
     try:
         if strategy == "my_strategy2.py":
@@ -677,10 +773,20 @@ def make_chart_html(
 
     .navlink {{ display:inline-block; text-decoration:none; background:#0e1830; border:1px solid #1b2940; color:#e6e6e6; padding: 7px 10px; border-radius: 999px; font-weight: 700; }}
     .navlink.active {{ background:#1b5cff33; border-color:#2b6dff; }}
+
+    .params-card {{ margin: 10px 0 12px 0; padding: 10px 12px; background: #0e1830; border: 1px solid #1b2940; border-radius: 12px; }}
+    .params-head {{ display: flex; gap: 8px; align-items: baseline; }}
+    .muted {{ opacity: 0.7; font-size: 12px; }}
+    .params-grid {{ margin-top: 8px; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 6px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }}
+    .p-k {{ opacity: 0.85; }}
+    .p-v {{ opacity: 0.95; overflow-wrap: anywhere; }}
+
     @media (max-width: 760px) {{
       .topbar label {{ font-size: 12px; }}
       select, input {{ flex: 1 1 140px; }}
       .apply {{ width: 100%; }}
+      .params-grid {{ grid-template-columns: 1fr; }}
+      .p-v {{ margin-bottom: 6px; }}
     }}
   </style>
   <script>
@@ -712,7 +818,7 @@ def make_chart_html(
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>
-  <div class="wrap">{plot_html}{trades_table_html}</div>
+  <div class="wrap">{params_html}{plot_html}{trades_table_html}</div>
 </body>
 </html>
 """

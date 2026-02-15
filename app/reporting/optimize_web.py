@@ -626,6 +626,93 @@ def _sample_params(rng, position_usd: float) -> Dict[str, Any]:
     }
 
 
+
+# ------------------------------
+# Optional local refinement (no extra deps)
+# ------------------------------
+
+_CONT_BOUNDS = {
+    "adx_no_trade_below": (10.0, 25.0),
+    "st_factor": (2.0, 6.0),
+    "atr_mult": (1.5, 5.0),
+}
+
+_COOLDOWNS = [0, 2, 4, 6, 8, 12, 16]
+_FLIPS = [2, 3, 4, 5, 6, 8, 10, 12]
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return float(max(lo, min(hi, x)))
+
+def _nearest_choice(val: int, choices: List[int]) -> int:
+    # pick the closest value in choices (stable)
+    best = choices[0]
+    best_d = abs(best - val)
+    for c in choices[1:]:
+        d = abs(c - val)
+        if d < best_d:
+            best, best_d = c, d
+    return int(best)
+
+def _neighbor_params_local(rng, base: Dict[str, Any], step_scale: float) -> Dict[str, Any]:
+    """Generate a small perturbation around `base` for local refinement.
+
+    step_scale in (0..1] controls how far we move. We keep indicator lengths fixed.
+    """
+    p = dict(base)
+
+    # continuous params: jitter with normal-like steps
+    for k, (lo, hi) in _CONT_BOUNDS.items():
+        cur = float(p.get(k, (lo + hi) / 2))
+        # step sizes chosen to be meaningful; scaled down over time
+        base_step = {
+            "adx_no_trade_below": 2.5,
+            "st_factor": 0.6,
+            "atr_mult": 0.6,
+        }[k]
+        delta = (rng.random() * 2 - 1) * base_step * step_scale
+        p[k] = _clamp(cur + delta, lo, hi)
+
+    # categorical: nudge to neighbor with some probability
+    if rng.random() < 0.35:
+        cur = int(p.get("rev_cooldown_hrs", 2))
+        cur = _nearest_choice(cur, _COOLDOWNS)
+        i = _COOLDOWNS.index(cur)
+        j = _clamp(i + rng.choice([-1, 1]), 0, len(_COOLDOWNS) - 1)
+        p["rev_cooldown_hrs"] = int(_COOLDOWNS[int(j)])
+
+    # booleans: rare toggles (avoid thrashing)
+    if rng.random() < 0.15:
+        p["use_no_trade"] = not bool(p.get("use_no_trade", True))
+
+    if rng.random() < 0.12:
+        p["use_flip_limit"] = not bool(p.get("use_flip_limit", False))
+
+    # keep dependent param consistent
+    if bool(p.get("use_flip_limit", False)):
+        cur = int(p.get("max_flips_per_day", 6))
+        cur = _nearest_choice(cur, _FLIPS)
+        if rng.random() < 0.4:
+            i = _FLIPS.index(cur)
+            j = _clamp(i + rng.choice([-1, 1]), 0, len(_FLIPS) - 1)
+            p["max_flips_per_day"] = int(_FLIPS[int(j)])
+        else:
+            p["max_flips_per_day"] = int(cur)
+    else:
+        p["max_flips_per_day"] = 6
+
+    # ensure required fields exist (in case base was partial)
+    p.setdefault("position_usd", float(base.get("position_usd", 1000.0)))
+    p.setdefault("adx_len", 14)
+    p.setdefault("adx_smooth", 14)
+    p.setdefault("st_atr_len", 14)
+    p.setdefault("use_rev_cooldown", True)
+    p.setdefault("use_emergency_sl", True)
+    p.setdefault("atr_len", 14)
+    p.setdefault("close_at_end", False)
+    return p
+
+
+
 def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float, float, float]], conn) -> None:
     import random
 
@@ -640,6 +727,8 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     seed = int(cfg.get("seed", 42))
     position_usd = float(cfg.get("position_usd", 1000.0))
     min_trades = int(cfg.get("min_trades", 5))
+    engine = str(cfg.get("engine", "random")).lower().strip() or "random"
+
     weights = {
         "w_ret": float(cfg.get("w_ret", 2.0)),
         "w_dd": float(cfg.get("w_dd", 1.5)),
@@ -658,63 +747,89 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     no_improve = 0
 
     run.status = "running"
-    _add_log(run, f"RUN_START run_id={run.run_id} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}")
-    # Make sure the run page can show status even if it is served by another worker.
+    _add_log(
+        run,
+        f"RUN_START run_id={run.run_id} engine={engine} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}",
+    )
     _persist_throttled(run, force=True, conn=conn)
 
+    def _eval_train(params: Dict[str, Any]) -> Tuple[float, Dict[str, float], int]:
+        bt_tr = backtest_strategy3(train_bars, **params)
+        m_tr = _equity_metrics(bt_tr.equity, base=position_usd)
+        trades_tr = len(bt_tr.trades)
+        s_tr = _score(m_tr, trades_tr, weights, min_trades)
+        return s_tr, m_tr, trades_tr
+
+    def _report_val(trial: int, params: Dict[str, Any], s_tr: float, m_tr: Dict[str, float], trades_tr: int) -> None:
+        bt_va = backtest_strategy3(va_bars, **params)
+        m_va = _equity_metrics(bt_va.equity, base=position_usd)
+        trades_va = len(bt_va.trades)
+        s_va = _score(m_va, trades_va, weights, min_trades)
+
+        run.best_score = s_va
+        run.best_params = params
+        run.best_trial = trial
+        run.best_metrics = {
+            **m_va,
+            "trades": trades_va,
+            "val_score": s_va,
+            "train_score": s_tr,
+            "train_metrics": {**m_tr, "trades": trades_tr},
+        }
+
+        _add_log(
+            run,
+            f"[{trial}/{trials}] best_val={s_va:.6f} (train_best={s_tr:.6f}, trial={trial}) "
+            f"VAL ret={m_va['ret']:.4f} dd={m_va['dd']:.4f} sharpe={m_va['sharpe']:.3f} trades={trades_va} "
+            f"TRAIN ret={m_tr['ret']:.4f} dd={m_tr['dd']:.4f} sharpe={m_tr['sharpe']:.3f} trades={trades_tr} "
+            f"st_factor={params.get('st_factor', 0):.2f} adx_nt<{params.get('adx_no_trade_below', 0):.1f} "
+            f"atr_mult={params.get('atr_mult', 0):.2f} cooldown={params.get('rev_cooldown_hrs', 0)}h"
+        )
+
     try:
+        # Phase plan
+        if engine not in ("random", "random_refine"):
+            engine = "random"
+            cfg["engine"] = engine
+
+        warmup_trials = trials
+        if engine == "random_refine":
+            # Keep warmup substantial to find a good basin; rest is local search.
+            warmup_trials = max(50, int(trials * 0.6))
+            cfg.setdefault("warmup_trials", warmup_trials)
+
         for trial in range(1, trials + 1):
             if max_seconds and (time.time() - t0) >= max_seconds:
                 _add_log(run, f"STOP max_seconds reached at trial={trial-1}")
                 break
 
-            params = _sample_params(rng, position_usd)
+            # Choose candidate
+            if engine == "random_refine" and run.best_params is not None and trial > warmup_trials:
+                # Local refinement: gradually reduce step size
+                refine_i = trial - warmup_trials
+                step_scale = max(0.15, 0.9 * (0.98 ** refine_i))  # decays slowly
+                params = _neighbor_params_local(rng, run.best_params, step_scale)
+                phase = "REFINE"
+            else:
+                params = _sample_params(rng, position_usd)
+                phase = "RANDOM"
 
-            # 1) Evaluate on TRAIN (used for selection).
-            bt_tr = backtest_strategy3(train_bars, **params)
-            m_tr = _equity_metrics(bt_tr.equity, base=position_usd)
-            trades_tr = len(bt_tr.trades)
-            s_tr = _score(m_tr, trades_tr, weights, min_trades)
-
-            # 2) Evaluate on VAL only when a new TRAIN-best is found (reporting).
-            m = None
-            trades = 0
-            s = float('-inf')
+            # Evaluate on TRAIN
+            s_tr, m_tr, trades_tr = _eval_train(params)
 
             run.trials_done = trial
             _persist_throttled(run, conn=conn)
 
             if s_tr > best_train_score:
                 best_train_score = s_tr
-
-                # Report on VAL (future chunk) for the new TRAIN-best candidate.
-                bt_va = backtest_strategy3(va_bars, **params)
-                m_va = _equity_metrics(bt_va.equity, base=position_usd)
-                trades_va = len(bt_va.trades)
-                s_va = _score(m_va, trades_va, weights, min_trades)
-
-                run.best_score = s_va
-                run.best_params = params
-                run.best_trial = trial
-                run.best_metrics = {
-                    **m_va,
-                    "trades": trades_va,
-                    "val_score": s_va,
-                    "train_score": s_tr,
-                    "train_metrics": {**m_tr, "trades": trades_tr},
-                }
+                _report_val(trial, params, s_tr, m_tr, trades_tr)
                 no_improve = 0
-                _add_log(
-                    run,
-                    f"[{trial}/{trials}] best_val={s_va:.6f} (train_best={s_tr:.6f}, trial={trial}) "
-                    f"VAL ret={m_va['ret']:.4f} dd={m_va['dd']:.4f} sharpe={m_va['sharpe']:.3f} trades={trades_va} "
-                    f"TRAIN ret={m_tr['ret']:.4f} dd={m_tr['dd']:.4f} sharpe={m_tr['sharpe']:.3f} trades={trades_tr} "
-                    f"st_factor={params['st_factor']:.2f} adx_nt<{params['adx_no_trade_below']:.1f} atr_mult={params['atr_mult']:.2f} cooldown={params['rev_cooldown_hrs']}h"
-                )
+                if phase == "REFINE":
+                    _add_log(run, f"PHASE refine step_scale={step_scale:.3f}")
             else:
                 no_improve += 1
 
-            # occasional progress line
+            # progress line
             if trial % max(1, trials // 20) == 0:
                 _add_log(run, f"PROGRESS trial={trial} best={run.best_score:.6f} best_trial={run.best_trial}")
 
@@ -945,6 +1060,13 @@ def _optimize_index_html(conn) -> str:
           <div>
             <label>tf</label>
             <input name='tf' value='120' style='width:90px'/>
+          </div>
+          <div>
+            <label>optimizer</label>
+            <select name='engine' style='width:160px'>
+              <option value='random' selected>Random</option>
+              <option value='random_refine'>Random + Refine</option>
+            </select>
           </div>
           <div>
             <label>limit-bars</label>
@@ -1199,6 +1321,9 @@ async def optimize_start(payload: Dict[str, Any]):
     max_seconds = int(payload.get("max_seconds", 900))
     patience = int(payload.get("patience", 300))
     position_usd = float(payload.get("position_usd", 1000))
+    engine = str(payload.get("engine", "random")).lower().strip() or "random"
+    if engine not in ("random", "random_refine"):
+        engine = "random"
 
     # Load bars first (fast fail)
     bars = load_bars(conn, symbol, tf, limit=limit_bars)
@@ -1212,6 +1337,7 @@ async def optimize_start(payload: Dict[str, Any]):
     cfg = {
         "symbol": symbol,
         "tf": tf,
+        "engine": engine,
         "limit_bars": limit_bars,
         "trials": trials,
         "max_seconds": max_seconds,

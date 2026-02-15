@@ -372,6 +372,27 @@ def _load_last_results(conn, limit: int = 30) -> List[Dict[str, Any]]:
     return out
 
 
+
+def _delete_opt_result(conn, opt_id: int) -> int:
+    """Delete a single saved optimization result by id.
+
+    Returns number of deleted rows (0/1).
+    """
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM opt_results WHERE id=%s", (int(opt_id),))
+                n = cur.rowcount or 0
+            conn.commit()
+            return int(n)
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        cur = conn.execute("DELETE FROM opt_results WHERE id=?", (int(opt_id),))
+        conn.commit()
+        return int(cur.rowcount or 0)
+
 # ------------------------------
 # DB helpers (cross-replica progress)
 # ------------------------------
@@ -627,92 +648,6 @@ def _sample_params(rng, position_usd: float) -> Dict[str, Any]:
 
 
 
-# ------------------------------
-# Optional local refinement (no extra deps)
-# ------------------------------
-
-_CONT_BOUNDS = {
-    "adx_no_trade_below": (10.0, 25.0),
-    "st_factor": (2.0, 6.0),
-    "atr_mult": (1.5, 5.0),
-}
-
-_COOLDOWNS = [0, 2, 4, 6, 8, 12, 16]
-_FLIPS = [2, 3, 4, 5, 6, 8, 10, 12]
-
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return float(max(lo, min(hi, x)))
-
-def _nearest_choice(val: int, choices: List[int]) -> int:
-    # pick the closest value in choices (stable)
-    best = choices[0]
-    best_d = abs(best - val)
-    for c in choices[1:]:
-        d = abs(c - val)
-        if d < best_d:
-            best, best_d = c, d
-    return int(best)
-
-def _neighbor_params_local(rng, base: Dict[str, Any], step_scale: float) -> Dict[str, Any]:
-    """Generate a small perturbation around `base` for local refinement.
-
-    step_scale in (0..1] controls how far we move. We keep indicator lengths fixed.
-    """
-    p = dict(base)
-
-    # continuous params: jitter with normal-like steps
-    for k, (lo, hi) in _CONT_BOUNDS.items():
-        cur = float(p.get(k, (lo + hi) / 2))
-        # step sizes chosen to be meaningful; scaled down over time
-        base_step = {
-            "adx_no_trade_below": 2.5,
-            "st_factor": 0.6,
-            "atr_mult": 0.6,
-        }[k]
-        delta = (rng.random() * 2 - 1) * base_step * step_scale
-        p[k] = _clamp(cur + delta, lo, hi)
-
-    # categorical: nudge to neighbor with some probability
-    if rng.random() < 0.35:
-        cur = int(p.get("rev_cooldown_hrs", 2))
-        cur = _nearest_choice(cur, _COOLDOWNS)
-        i = _COOLDOWNS.index(cur)
-        j = _clamp(i + rng.choice([-1, 1]), 0, len(_COOLDOWNS) - 1)
-        p["rev_cooldown_hrs"] = int(_COOLDOWNS[int(j)])
-
-    # booleans: rare toggles (avoid thrashing)
-    if rng.random() < 0.15:
-        p["use_no_trade"] = not bool(p.get("use_no_trade", True))
-
-    if rng.random() < 0.12:
-        p["use_flip_limit"] = not bool(p.get("use_flip_limit", False))
-
-    # keep dependent param consistent
-    if bool(p.get("use_flip_limit", False)):
-        cur = int(p.get("max_flips_per_day", 6))
-        cur = _nearest_choice(cur, _FLIPS)
-        if rng.random() < 0.4:
-            i = _FLIPS.index(cur)
-            j = _clamp(i + rng.choice([-1, 1]), 0, len(_FLIPS) - 1)
-            p["max_flips_per_day"] = int(_FLIPS[int(j)])
-        else:
-            p["max_flips_per_day"] = int(cur)
-    else:
-        p["max_flips_per_day"] = 6
-
-    # ensure required fields exist (in case base was partial)
-    p.setdefault("position_usd", float(base.get("position_usd", 1000.0)))
-    p.setdefault("adx_len", 14)
-    p.setdefault("adx_smooth", 14)
-    p.setdefault("st_atr_len", 14)
-    p.setdefault("use_rev_cooldown", True)
-    p.setdefault("use_emergency_sl", True)
-    p.setdefault("atr_len", 14)
-    p.setdefault("close_at_end", False)
-    return p
-
-
-
 def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float, float, float]], conn) -> None:
     import random
 
@@ -727,7 +662,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     seed = int(cfg.get("seed", 42))
     position_usd = float(cfg.get("position_usd", 1000.0))
     min_trades = int(cfg.get("min_trades", 5))
-    engine = str(cfg.get("engine", "random")).lower().strip() or "random"
+    optimizer = str(cfg.get("optimizer", "random")).lower().strip() or "random"
 
     weights = {
         "w_ret": float(cfg.get("w_ret", 2.0)),
@@ -741,7 +676,6 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     rng = random.Random(seed)
 
     train_bars, va_bars = _train_val_split(bars, train_frac)
-    # Classical scheme: choose params by TRAIN score, report metrics on VAL (future chunk).
     best_train_score = float("-inf")
     t0 = time.time()
     no_improve = 0
@@ -749,95 +683,121 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     run.status = "running"
     _add_log(
         run,
-        f"RUN_START run_id={run.run_id} engine={engine} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}",
+        f"RUN_START run_id={run.run_id} optimizer={optimizer} symbol={symbol} tf={tf} bars={len(bars)} trials={trials}",
     )
     _persist_throttled(run, force=True, conn=conn)
 
-    def _eval_train(params: Dict[str, Any]) -> Tuple[float, Dict[str, float], int]:
+    def _maybe_update_best(params: Dict[str, Any], trial_no: int) -> float:
+        nonlocal best_train_score, no_improve
+
         bt_tr = backtest_strategy3(train_bars, **params)
         m_tr = _equity_metrics(bt_tr.equity, base=position_usd)
         trades_tr = len(bt_tr.trades)
         s_tr = _score(m_tr, trades_tr, weights, min_trades)
-        return s_tr, m_tr, trades_tr
 
-    def _report_val(trial: int, params: Dict[str, Any], s_tr: float, m_tr: Dict[str, float], trades_tr: int) -> None:
-        bt_va = backtest_strategy3(va_bars, **params)
-        m_va = _equity_metrics(bt_va.equity, base=position_usd)
-        trades_va = len(bt_va.trades)
-        s_va = _score(m_va, trades_va, weights, min_trades)
+        run.trials_done = int(trial_no)
+        _persist_throttled(run, conn=conn)
 
-        run.best_score = s_va
-        run.best_params = params
-        run.best_trial = trial
-        run.best_metrics = {
-            **m_va,
-            "trades": trades_va,
-            "val_score": s_va,
-            "train_score": s_tr,
-            "train_metrics": {**m_tr, "trades": trades_tr},
-        }
+        if s_tr > best_train_score:
+            best_train_score = s_tr
 
-        _add_log(
-            run,
-            f"[{trial}/{trials}] best_val={s_va:.6f} (train_best={s_tr:.6f}, trial={trial}) "
-            f"VAL ret={m_va['ret']:.4f} dd={m_va['dd']:.4f} sharpe={m_va['sharpe']:.3f} trades={trades_va} "
-            f"TRAIN ret={m_tr['ret']:.4f} dd={m_tr['dd']:.4f} sharpe={m_tr['sharpe']:.3f} trades={trades_tr} "
-            f"st_factor={params.get('st_factor', 0):.2f} adx_nt<{params.get('adx_no_trade_below', 0):.1f} "
-            f"atr_mult={params.get('atr_mult', 0):.2f} cooldown={params.get('rev_cooldown_hrs', 0)}h"
-        )
+            bt_va = backtest_strategy3(va_bars, **params)
+            m_va = _equity_metrics(bt_va.equity, base=position_usd)
+            trades_va = len(bt_va.trades)
+            s_va = _score(m_va, trades_va, weights, min_trades)
+
+            run.best_score = s_va
+            run.best_params = params
+            run.best_trial = int(trial_no)
+            run.best_metrics = {
+                **m_va,
+                "trades": trades_va,
+                "val_score": s_va,
+                "train_score": s_tr,
+                "train_metrics": {**m_tr, "trades": trades_tr},
+            }
+            no_improve = 0
+            _add_log(
+                run,
+                f"[{trial_no}/{trials}] best_val={s_va:.6f} (train_best={s_tr:.6f}, trial={trial_no}) "
+                f"VAL ret={m_va['ret']:.4f} dd={m_va['dd']:.4f} sharpe={m_va['sharpe']:.3f} trades={trades_va} "
+                f"TRAIN ret={m_tr['ret']:.4f} dd={m_tr['dd']:.4f} sharpe={m_tr['sharpe']:.3f} trades={trades_tr} "
+                f"st_factor={params['st_factor']:.2f} adx_nt<{params['adx_no_trade_below']:.1f} atr_mult={params['atr_mult']:.2f} cooldown={params['rev_cooldown_hrs']}h",
+            )
+        else:
+            no_improve += 1
+
+        return float(s_tr)
 
     try:
-        # Phase plan
-        if engine not in ("random", "random_refine"):
-            engine = "random"
-            cfg["engine"] = engine
+        if optimizer == "optuna_tpe":
+            try:
+                import optuna  # type: ignore
+            except Exception as e:
+                raise RuntimeError("Optuna is not installed. Add optuna to requirements.txt") from e
 
-        warmup_trials = trials
-        if engine == "random_refine":
-            # Keep warmup substantial to find a good basin; rest is local search.
-            warmup_trials = max(50, int(trials * 0.6))
-            cfg.setdefault("warmup_trials", warmup_trials)
+            study = optuna.create_study(
+                direction="maximize",
+                sampler=optuna.samplers.TPESampler(seed=seed),
+            )
 
-        for trial in range(1, trials + 1):
-            if max_seconds and (time.time() - t0) >= max_seconds:
-                _add_log(run, f"STOP max_seconds reached at trial={trial-1}")
-                break
+            def objective(trial):
+                use_flip_limit = trial.suggest_categorical("use_flip_limit", [False, True])
+                params = {
+                    "position_usd": float(position_usd),
+                    "use_no_trade": trial.suggest_categorical("use_no_trade", [True, False]),
+                    "adx_len": 14,
+                    "adx_smooth": 14,
+                    "adx_no_trade_below": float(trial.suggest_float("adx_no_trade_below", 10.0, 25.0)),
+                    "st_atr_len": 14,
+                    "st_factor": float(trial.suggest_float("st_factor", 2.0, 6.0)),
+                    "use_rev_cooldown": True,
+                    "rev_cooldown_hrs": int(trial.suggest_categorical("rev_cooldown_hrs", [0, 2, 4, 6, 8, 12, 16])),
+                    "use_flip_limit": bool(use_flip_limit),
+                    "max_flips_per_day": int(trial.suggest_categorical("max_flips_per_day", [2, 3, 4, 5, 6, 8, 10, 12])) if use_flip_limit else 6,
+                    "use_emergency_sl": True,
+                    "atr_len": 14,
+                    "atr_mult": float(trial.suggest_float("atr_mult", 1.5, 5.0)),
+                    "close_at_end": False,
+                }
 
-            # Choose candidate
-            if engine == "random_refine" and run.best_params is not None and trial > warmup_trials:
-                # Local refinement: gradually reduce step size
-                refine_i = trial - warmup_trials
-                step_scale = max(0.15, 0.9 * (0.98 ** refine_i))  # decays slowly
-                params = _neighbor_params_local(rng, run.best_params, step_scale)
-                phase = "REFINE"
-            else:
+                trial_no = int(trial.number) + 1
+
+                if max_seconds and (time.time() - t0) >= max_seconds:
+                    study.stop()
+                    return float("-inf")
+
+                s_tr = _maybe_update_best(params, trial_no)
+
+                if trial_no % max(1, trials // 20) == 0:
+                    _add_log(run, f"PROGRESS trial={trial_no} best={run.best_score:.6f} best_trial={run.best_trial}")
+
+                if patience and no_improve >= patience:
+                    _add_log(run, f"EARLY_STOP patience={patience} reached at trial={trial_no} best_trial={run.best_trial}")
+                    study.stop()
+
+                return float(s_tr)
+
+            study.optimize(objective, n_trials=trials, timeout=float(max_seconds) if max_seconds else None)
+
+        else:
+            # classic random (default)
+            for trial in range(1, trials + 1):
+                if max_seconds and (time.time() - t0) >= max_seconds:
+                    _add_log(run, f"STOP max_seconds reached at trial={trial-1}")
+                    break
+
                 params = _sample_params(rng, position_usd)
-                phase = "RANDOM"
+                _maybe_update_best(params, trial)
 
-            # Evaluate on TRAIN
-            s_tr, m_tr, trades_tr = _eval_train(params)
+                if trial % max(1, trials // 20) == 0:
+                    _add_log(run, f"PROGRESS trial={trial} best={run.best_score:.6f} best_trial={run.best_trial}")
 
-            run.trials_done = trial
-            _persist_throttled(run, conn=conn)
+                if patience and no_improve >= patience:
+                    _add_log(run, f"EARLY_STOP patience={patience} reached at trial={trial} best_trial={run.best_trial}")
+                    break
 
-            if s_tr > best_train_score:
-                best_train_score = s_tr
-                _report_val(trial, params, s_tr, m_tr, trades_tr)
-                no_improve = 0
-                if phase == "REFINE":
-                    _add_log(run, f"PHASE refine step_scale={step_scale:.3f}")
-            else:
-                no_improve += 1
-
-            # progress line
-            if trial % max(1, trials // 20) == 0:
-                _add_log(run, f"PROGRESS trial={trial} best={run.best_score:.6f} best_trial={run.best_trial}")
-
-            if patience and no_improve >= patience:
-                _add_log(run, f"EARLY_STOP patience={patience} reached at trial={trial} best_trial={run.best_trial}")
-                break
-
-        # Compute FULL-window metrics for the chosen params (for later chart comparison).
+        # FULL metrics for chart comparison
         if run.best_params:
             bt_full = backtest_strategy3(bars, **run.best_params)
             m_full = _equity_metrics(bt_full.equity, base=position_usd)
@@ -853,7 +813,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
         dur = run.finished_at - run.started_at
         _add_log(
             run,
-            f"DONE run_id={run.run_id} trials_done={run.trials_done} best_score={run.best_score:.6f} best_trial={run.best_trial} duration_sec={dur:.1f}"
+            f"DONE run_id={run.run_id} trials_done={run.trials_done} best_score={run.best_score:.6f} best_trial={run.best_trial} duration_sec={dur:.1f}",
         )
         if run.best_params:
             _add_log(run, "BEST_PARAMS " + json.dumps(run.best_params, ensure_ascii=False))
@@ -862,7 +822,6 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
 
         _persist_throttled(run, force=True, conn=conn)
 
-        # Persist ONLY final result
         _ensure_opt_results_table(conn)
         _insert_opt_result(
             conn,
@@ -873,18 +832,19 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
             status="done",
             duration_sec=float(dur),
             trials_done=int(run.trials_done),
-            best_score=float(run.best_score) if run.best_score != float("-inf") else None,
+            best_score=None if run.best_score == float("-inf") else float(run.best_score),
             best_params=run.best_params,
             best_metrics=run.best_metrics,
         )
 
-    except Exception as e:  # pragma: no cover
+    except Exception as e:
         run.finished_at = time.time()
         run.status = "error"
-        run.error = repr(e)
-        _add_log(run, "ERROR " + run.error)
+        run.error = str(e)
         _persist_throttled(run, force=True, conn=conn)
-        # Persist error summary
+        _add_log(run, f"ERROR {type(e).__name__}: {e}")
+
+        dur = (run.finished_at or time.time()) - run.started_at
         try:
             _ensure_opt_results_table(conn)
             _insert_opt_result(
@@ -894,62 +854,14 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                 tf=str(tf),
                 config=cfg,
                 status="error",
-                duration_sec=float(run.finished_at - run.started_at),
+                duration_sec=float(dur),
                 trials_done=int(run.trials_done),
-                best_score=float(run.best_score) if run.best_score != float("-inf") else None,
+                best_score=None if run.best_score == float("-inf") else float(run.best_score),
                 best_params=run.best_params,
-                best_metrics={"error": run.error, **(run.best_metrics or {})},
+                best_metrics=run.best_metrics,
             )
         except Exception:
             pass
-
-
-# ------------------------------
-# HTML
-# ------------------------------
-
-
-def _page_shell(title: str, body: str, head_extra: str = "") -> str:
-    return f"""<!doctype html>
-<html lang='ru'>
-<head>
-  <meta charset='utf-8'/>
-  <meta name='viewport' content='width=device-width, initial-scale=1'/>
-  <title>{html.escape(title)}</title>
-  <style>
-    body {{ font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background: #0b1020; color: #e8eaf2; }}
-    a {{ color: #9ad1ff; }}
-    .wrap {{ max-width: 1100px; margin: 0 auto; padding: 18px; }}
-    .card {{ background: #111a33; border: 1px solid #1f2a4d; border-radius: 14px; padding: 14px; margin: 12px 0; }}
-    .row {{ display:flex; gap: 10px; flex-wrap: wrap; align-items: end; }}
-    label {{ font-size: 12px; opacity: .85; display:block; margin-bottom: 4px; }}
-    input, select {{ background: #0d1430; border: 1px solid #22315c; color: #e8eaf2; border-radius: 10px; padding: 8px 10px; }}
-    button {{ background: #2b78ff; border: none; color: white; border-radius: 10px; padding: 9px 12px; cursor:pointer; font-weight:600; }}
-    button:disabled {{ opacity:.5; cursor:not-allowed; }}
-    pre {{ white-space: pre-wrap; word-break: break-word; background: #0d1430; border: 1px solid #22315c; border-radius: 10px; padding: 10px; max-height: 420px; overflow:auto; }}
-    table {{ width:100%; border-collapse: collapse; }}
-    th, td {{ text-align:left; padding: 8px; border-bottom: 1px solid #1f2a4d; font-size: 13px; }}
-    .muted {{ opacity: .75; }}
-    .pill {{ display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #22315c; }}
-  </style>
-  {head_extra}
-</head>
-<body>
-  <div class='wrap'>
-    <div style='display:flex; justify-content:space-between; align-items:center; gap:12px;'>
-      <div>
-        <div style='font-size:20px; font-weight:700;'>{html.escape(title)}</div>
-        <div class='muted' style='margin-top:4px;'>Оптимизация Strategy 3 (2h). Итерации показываем в вебе, в Postgres сохраняем только итог.</div>
-      </div>
-      <div class='topnav'>
-        <a class='btn ghost' href='/chart'>📈 Chart</a>
-        <a class='btn primary' href='/optimize'>🧪 Optimizer</a>
-      </div>
-    </div>
-    {body}
-  </div>
-</body>
-</html>"""
 
 
 def _optimize_index_html(conn) -> str:
@@ -991,6 +903,7 @@ def _optimize_index_html(conn) -> str:
                 f"<td>{bs_str}</td>",
                 f"<td class='muted'>{html.escape(str(bp)[:140]) if bp else ''}</td>",
                 f"<td class='muted'>{html.escape(str(bm)[:140]) if bm else ''}</td>",
+                f"<td><button type='button' class='btn ghost' onclick=\"deleteResult({int(r.get('id') or 0)})\" title='Delete'>🗑️</button></td>",
             ]
         ) + "</tr>"
 
@@ -1042,6 +955,7 @@ def _optimize_index_html(conn) -> str:
             </div>
             <div style='display:flex; flex-direction:column; gap:8px; align-items:flex-end;'>
               <a class='btn ghost' href='{chart_href}'>Open chart</a>
+              <button type='button' class='btn ghost' onclick="deleteResult({rid})" title='Delete'>🗑️</button>
             </div>
           </div>
         </div>
@@ -1060,13 +974,6 @@ def _optimize_index_html(conn) -> str:
           <div>
             <label>tf</label>
             <input name='tf' value='120' style='width:90px'/>
-          </div>
-          <div>
-            <label>optimizer</label>
-            <select name='engine' style='width:160px'>
-              <option value='random' selected>Random</option>
-              <option value='random_refine'>Random + Refine</option>
-            </select>
           </div>
           <div>
             <label>limit-bars</label>
@@ -1091,6 +998,14 @@ def _optimize_index_html(conn) -> str:
           <div>
             <button type='submit'>Start optimize</button>
           </div>
+<div>
+            <label>optimizer</label>
+            <select name='optimizer' style='width:170px'>
+              <option value='random' selected>Random (classic)</option>
+              <option value='optuna_tpe'>Optuna TPE</option>
+            </select>
+          </div>
+
         </div>
         <div class='muted' style='margin-top:10px;'>В Postgres сохраняем только финал. Прогресс смотри на странице run.</div>
       </form>
@@ -1106,7 +1021,7 @@ def _optimize_index_html(conn) -> str:
       </div>
       <table>
         <thead><tr>
-          <th>created</th><th>symbol</th><th>tf</th><th>status</th><th>trials</th><th>best_score</th><th>best_params</th><th>best_metrics</th>
+          <th>created</th><th>symbol</th><th>tf</th><th>status</th><th>trials</th><th>best_score</th><th>best_params</th><th>best_metrics</th><th></th>
         </tr></thead>
         <tbody>
           {rows_html if rows_html else "<tr><td colspan='8' class='muted'>No results yet.</td></tr>"}
@@ -1137,7 +1052,24 @@ def _optimize_index_html(conn) -> str:
         window.location.href = `/optimize/run/${{j.run_id}}`;
       }});
 
-      async function clearResults(mode) {{
+            async function deleteResult(id) {{
+        if (!id) return;
+        const ok = confirm(`Удалить результат #${{id}}?`);
+        if (!ok) return;
+        const res = await fetch('/api/optimize/delete', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ id }})
+        }});
+        const j = await res.json();
+        if (!res.ok) {{
+          alert(j.detail || 'Failed');
+          return;
+        }}
+        window.location.reload();
+      }}
+
+async function clearResults(mode) {{
         const ok = (mode === 'all')
           ? confirm('Очистить ВСЕ результаты оптимизации?')
           : confirm('Очистить только error результаты?');
@@ -1309,7 +1241,7 @@ async def optimize_start(payload: Dict[str, Any]):
     """Start optimizer.
 
     payload fields (strings from form):
-      symbol, tf, limit_bars, trials, max_seconds, patience, position_usd
+      symbol, tf, limit_bars, trials, max_seconds, patience, position_usd, optimizer
     """
 
     from app.main import conn  # noqa: WPS433
@@ -1321,9 +1253,8 @@ async def optimize_start(payload: Dict[str, Any]):
     max_seconds = int(payload.get("max_seconds", 900))
     patience = int(payload.get("patience", 300))
     position_usd = float(payload.get("position_usd", 1000))
-    engine = str(payload.get("engine", "random")).lower().strip() or "random"
-    if engine not in ("random", "random_refine"):
-        engine = "random"
+
+    optimizer = str(payload.get("optimizer", "random")).strip() or "random"
 
     # Load bars first (fast fail)
     bars = load_bars(conn, symbol, tf, limit=limit_bars)
@@ -1337,12 +1268,12 @@ async def optimize_start(payload: Dict[str, Any]):
     cfg = {
         "symbol": symbol,
         "tf": tf,
-        "engine": engine,
         "limit_bars": limit_bars,
         "trials": trials,
         "max_seconds": max_seconds,
         "patience": patience,
         "position_usd": position_usd,
+        "optimizer": optimizer,
         "train_frac": 0.7,
         "seed": 42,
         "min_trades": 5,
@@ -1477,3 +1408,23 @@ async def optimize_clear(payload: Dict[str, Any]):
         conn.commit()
 
     return {"ok": True, "mode": mode}
+
+
+@router.post("/api/optimize/delete")
+async def optimize_delete(payload: Dict[str, Any]):
+    """Delete a single saved optimization result.
+
+    payload: {"id": <int>}
+    """
+
+    from app.main import conn  # noqa: WPS433
+
+    opt_id = payload.get("id")
+    try:
+        opt_id_int = int(opt_id)
+    except Exception:
+        return JSONResponse(status_code=400, content={"detail": "Invalid id"})
+
+    _ensure_opt_results_table(conn)
+    n = _delete_opt_result(conn, opt_id_int)
+    return {"ok": True, "deleted": n, "id": opt_id_int}

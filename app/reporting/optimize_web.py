@@ -27,6 +27,52 @@ router = APIRouter()
 
 
 # ------------------------------
+# Small HTML shell helper
+# ------------------------------
+
+def _page_shell(title: str, body_html: str) -> str:
+    """Wrap page body into a minimal responsive HTML document."""
+
+    t = html.escape(title)
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+  <title>{t}</title>
+  <style>
+    body {{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #0b1220; color: #e6e6e6; }}
+    a {{ color: inherit; }}
+    .topbar {{ padding: 10px 14px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #1b2940; position: sticky; top: 0; background: #0b1220; z-index: 10; flex-wrap: wrap; }}
+    .navlink {{ display:inline-block; text-decoration:none; background:#0e1830; border:1px solid #1b2940; color:#e6e6e6; padding: 7px 10px; border-radius: 999px; font-weight: 700; }}
+    .navlink.active {{ background:#1b5cff33; border-color:#2b6dff; }}
+    .wrap {{ padding: 10px 14px 20px 14px; }}
+    select, input, button {{ background: #0e1830; color: #e6e6e6; border: 1px solid #1b2940; border-radius: 8px; padding: 7px 10px; outline: none; }}
+    button {{ cursor: pointer; }}
+    .apply {{ background: #2b6dff; border: 0; color: #fff; font-weight: 700; }}
+    .danger {{ background: #fb7185; border: 0; color: #0b1220; font-weight: 800; }}
+    .muted {{ opacity: 0.85; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 8px 6px; border-bottom: 1px solid #15243a; font-size: 12px; }}
+    thead th {{ position: sticky; top: 58px; background: #0b1220; z-index: 5; text-align: left; opacity: 0.9; }}
+    @media (max-width: 760px) {{
+      .topbar {{ gap: 8px; }}
+      select, input {{ flex: 1 1 140px; }}
+      .apply {{ width: 100%; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class=\"topbar\">
+    <a class=\"navlink\" href=\"/chart\">📈 Chart</a>
+    <a class=\"navlink active\" href=\"/optimize\">🧪 Optimizer</a>
+  </div>
+  <div class=\"wrap\">{body_html}</div>
+</body>
+</html>"""
+
+
+# ------------------------------
 # In-memory run state (online progress)
 # ------------------------------
 

@@ -10,3 +10,5 @@ httpx==0.27.2
 
 # Optional: enable Postgres on Railway by setting DATABASE_URL
 psycopg2-binary==2.9.9
+
+optuna==3.6.1

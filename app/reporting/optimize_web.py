@@ -47,6 +47,10 @@ def _page_shell(title: str, body_html: str) -> str:
     .navlink {{ display:inline-block; text-decoration:none; background:#0e1830; border:1px solid #1b2940; color:#e6e6e6; padding: 7px 10px; border-radius: 999px; font-weight: 700; }}
     .navlink.active {{ background:#1b5cff33; border-color:#2b6dff; }}
     .wrap {{ padding: 10px 14px 20px 14px; }}
+	    /* Grid-like rows used by the optimizer form */
+	    .row {{ display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; }}
+	    .row > div {{ display:flex; flex-direction:column; gap:6px; }}
+	    .row label {{ font-size: 12px; opacity: 0.9; }}
     select, input, button {{ background: #0e1830; color: #e6e6e6; border: 1px solid #1b2940; border-radius: 8px; padding: 7px 10px; outline: none; }}
     button {{ cursor: pointer; }}
     .apply {{ background: #2b6dff; border: 0; color: #fff; font-weight: 700; }}
@@ -57,6 +61,7 @@ def _page_shell(title: str, body_html: str) -> str:
     thead th {{ position: sticky; top: 58px; background: #0b1220; z-index: 5; text-align: left; opacity: 0.9; }}
     @media (max-width: 760px) {{
       .topbar {{ gap: 8px; }}
+	      .row {{ flex-direction: column; align-items: stretch; }}
       select, input {{ flex: 1 1 140px; }}
       .apply {{ width: 100%; }}
     }}

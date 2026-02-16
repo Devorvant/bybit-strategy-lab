@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import math
 
 from typing import List, Tuple, Optional, Literal
@@ -9,6 +9,39 @@ from typing import List, Tuple, Optional, Literal
 
 Bar = Tuple[int, float, float, float, float, float]  # (ts_ms,o,h,l,c,v)
 Side = Literal["LONG", "SHORT"]
+
+
+def _round_px_worst(px: float, tick: float, side: str) -> float:
+    """Round price to tick size in a direction that is worst for the trader.
+    side: "BUY" or "SELL".
+    """
+    if tick <= 0:
+        return px
+    q = px / tick
+    if side == "BUY":
+        return math.ceil(q) * tick
+    else:
+        return math.floor(q) * tick
+
+
+def _apply_fill_px(px: float, side: str, slippage_ticks: int, spread_ticks: float, tick: float) -> float:
+    """Apply spread (half on each side) + slippage (per side) and round to tick.
+    side: "BUY" or "SELL".
+    """
+    if tick <= 0:
+        return px
+    half_spread = max(0.0, float(spread_ticks)) / 2.0
+    slip = max(0.0, int(slippage_ticks))
+    ticks = half_spread + slip
+    if side == "BUY":
+        adj = px + ticks * tick
+    else:
+        adj = px - ticks * tick
+    return _round_px_worst(adj, tick, side)
+
+
+def _fee_usd(notional_usd: float, fee_percent: float) -> float:
+    return abs(notional_usd) * (max(0.0, float(fee_percent)) / 100.0)
 
 
 def _rma(values: List[float], n: int) -> List[Optional[float]]:
@@ -187,18 +220,18 @@ def backtest_strategy3(
     use_emergency_sl: bool = True,
     atr_len: int = 14,
     atr_mult: float = 3.0,
+    # Execution frictions (used in /chart only; optimizer leaves defaults)
+    slippage_ticks: int = 0,
+    tick_size: float = 0.0001,
+    fee_percent: float = 0.0,          # per side, in percent (e.g. 0.06)
+    spread_ticks: float = 0.0,         # full bid-ask spread in ticks
+    funding_8h_percent: float = 0.0,   # funding per 8h in percent (perp)
     sl_atr_len: Optional[int] = None,    # backward compat
     sl_atr_mult: Optional[float] = None, # backward compat
     close_at_end: bool = False,
     leverage_mult: Optional[float] = None,
     trade_from_current_capital: bool = False,
     capital_usd: float = 10000.0,
-    # Costs/frictions (chart-only defaults; optimizer does not pass these)
-    fee_percent: float = 0.0,           # % per side
-    spread_ticks: float = 0.0,          # full bid-ask in ticks
-    slippage_ticks: int = 0,            # extra ticks per side
-    tick_size: float = 0.0,             # price tick
-    funding_8h_percent: float = 0.0,    # % of notional per 8h
 ) -> BacktestResult:
     if not bars:
         return BacktestResult([], None, [], [], [], [], [], [])
@@ -230,13 +263,14 @@ def backtest_strategy3(
     equity_ts: List[int] = []
     equity: List[float] = []
 
+    FUNDING_MS = 8 * 60 * 60 * 1000
+
     pos = 0  # 1 long, -1 short, 0 flat
     entry_ts = 0
     entry_price = 0.0
+    entry_fee = 0.0
     realized = 0.0
     cum = 0.0
-    open_entry_fee = 0.0
-    open_funding = 0.0
 
 
     # Position sizing
@@ -258,51 +292,11 @@ def backtest_strategy3(
         if trade_from_current_capital:
             base = max(0.0, float(capital_usd) + float(realized))
         return base * lm
-
-    def _open_position(i: int, direction: int, raw_px: float) -> None:
-        nonlocal pos, entry_ts, entry_price, entry_size_usd, realized, cum, open_entry_fee, open_funding, next_funding_ms, last_flip_time, flips_today
-        entry_size_usd = _calc_entry_size_usd()
-        pos = 1 if direction >= 0 else -1
-        entry_ts = ts[i]
-        # direction: long opens with BUY, short opens with SELL
-        entry_price = _apply_costs_to_price(raw_px, is_buy=(pos == 1))
-        open_entry_fee = entry_size_usd * (float(fee_percent) / 100.0) if fee_percent else 0.0
-        if open_entry_fee:
-            realized -= open_entry_fee
-            cum -= open_entry_fee
-        open_funding = 0.0
-        next_funding_ms = _next_funding_ts_ms(entry_ts) if funding_8h_percent else None
-        last_flip_time = ts[i]
-        flips_today += 1
-
-    def _close_position(i: int, raw_px: float, reason: str) -> None:
-        nonlocal pos, realized, cum, open_entry_fee, open_funding, next_funding_ms
-        if pos == 0:
-            return
-        # closing: long closes with SELL, short closes with BUY
-        is_buy = (pos == -1)
-        px_fill = _apply_costs_to_price(raw_px, is_buy=is_buy)
-        if entry_price <= 0 or px_fill <= 0:
-            pnl_gross = 0.0
-        else:
-            pnl_gross = entry_size_usd * pos * (px_fill - entry_price) / entry_price
-        exit_fee = entry_size_usd * (float(fee_percent) / 100.0) if fee_percent else 0.0
-        pnl_net = pnl_gross - exit_fee
-        realized += pnl_net
-        cum += pnl_net
-        trade_pnl = pnl_gross + open_funding - exit_fee - open_entry_fee
-        trades.append(Trade("LONG" if pos == 1 else "SHORT", entry_ts, entry_price, ts[i], px_fill, trade_pnl, reason, cum))
-        pos = 0
-        open_entry_fee = 0.0
-        open_funding = 0.0
-        next_funding_ms = None
     last_flip_time: Optional[int] = None
     cooldown_ms = int(rev_cooldown_hrs * 60 * 60 * 1000)
 
     flips_today = 0
     cur_day = datetime.utcfromtimestamp(ts[0] / 1000).date()
-    next_funding_ms: Optional[int] = None
-
 
     def mark_to_market(i: int) -> float:
         # Be defensive: some data sources may occasionally provide zero/invalid prices.
@@ -314,34 +308,6 @@ def backtest_strategy3(
         unreal = entry_size_usd * pos * (c[i] - entry_price) / entry_price
         return realized + unreal
 
-    def _round_to_tick(px: float, is_buy: bool) -> float:
-        if tick_size and tick_size > 0:
-            q = px / tick_size
-            if is_buy:
-                q = math.ceil(q - 1e-12)
-            else:
-                q = math.floor(q + 1e-12)
-            return q * tick_size
-        return px
-
-    def _apply_costs_to_price(px: float, is_buy: bool) -> float:
-        """Apply half-spread + slippage (in ticks) and round in the worse direction."""
-        adj_ticks = (float(slippage_ticks) if slippage_ticks else 0.0) + (float(spread_ticks) if spread_ticks else 0.0) / 2.0
-        if tick_size and tick_size > 0 and adj_ticks:
-            px = px + adj_ticks * tick_size if is_buy else px - adj_ticks * tick_size
-        return _round_to_tick(px, is_buy=is_buy)
-
-    def _next_funding_ts_ms(ts_ms: int) -> int:
-        """Next funding timestamp in ms at 00:00, 08:00, 16:00 UTC."""
-        dt = datetime.utcfromtimestamp(ts_ms / 1000.0)
-        for h in (0, 8, 16):
-            cand = dt.replace(hour=h, minute=0, second=0, microsecond=0)
-            if int(cand.timestamp() * 1000) > ts_ms:
-                return int(cand.timestamp() * 1000)
-        # next day 00:00
-        nd = dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        return int(nd.timestamp() * 1000)
-
     for i in range(len(bars)):
         # new day resets flip counter
         d = datetime.utcfromtimestamp(ts[i] / 1000).date()
@@ -349,17 +315,20 @@ def backtest_strategy3(
             cur_day = d
             flips_today = 0
 
-        # Apply funding (perpetuals): every 8h at 00:00/08:00/16:00 UTC
-        if funding_8h_percent and pos != 0:
-            if next_funding_ms is None:
-                next_funding_ms = _next_funding_ts_ms(ts[i-1] if i > 0 else ts[i])
-            while next_funding_ms is not None and ts[i] >= next_funding_ms:
+        # Funding (perp) every 8 hours (00:00/08:00/16:00 UTC buckets)
+        if pos != 0 and funding_8h_percent != 0.0 and i > 0:
+            prev_bucket = ts[i - 1] // FUNDING_MS
+            cur_bucket = ts[i] // FUNDING_MS
+            if cur_bucket > prev_bucket:
+                # apply funding for each boundary crossed
+                periods = int(cur_bucket - prev_bucket)
                 rate = float(funding_8h_percent) / 100.0
-                charge = (-pos) * entry_size_usd * rate
-                realized += charge
-                open_funding += charge
-                cum += charge
-                next_funding_ms += 8 * 60 * 60 * 1000
+                # long pays when rate>0, short receives
+                sign = -1.0 if pos == 1 else 1.0
+                funding_pnl = sign * entry_size_usd * rate * periods
+                realized += funding_pnl
+                cum += funding_pnl
+
         equity_ts.append(ts[i])
         equity.append(mark_to_market(i))
 
@@ -373,14 +342,34 @@ def backtest_strategy3(
             if pos == 1:
                 stop_px = entry_price - atr_v[i] * atr_mult
                 if l[i] <= stop_px:
-                    _close_position(i, stop_px, "STOP_LONG")
+                    exit_side = "SELL"
+                    exit_px = _apply_fill_px(stop_px, exit_side, slippage_ticks, spread_ticks, tick_size)
+                    pnl = entry_size_usd * pos * (exit_px - entry_price) / entry_price
+                    exit_fee = _fee_usd(entry_size_usd, fee_percent)
+                    pnl_net = pnl - exit_fee
+                    realized += pnl_net
+                    cum += pnl_net
+                    trades.append(
+                        Trade("LONG", entry_ts, entry_price, ts[i], exit_px, pnl_net, "STOP_LONG", cum)
+                    )
+                    pos = 0
                     # update equity point after forced close
                     equity[-1] = realized
                     continue
             else:  # pos == -1
                 stop_px = entry_price + atr_v[i] * atr_mult
                 if h[i] >= stop_px:
-                    _close_position(i, stop_px, "STOP_SHORT")
+                    exit_side = "BUY"
+                    exit_px = _apply_fill_px(stop_px, exit_side, slippage_ticks, spread_ticks, tick_size)
+                    pnl = entry_size_usd * pos * (exit_px - entry_price) / entry_price
+                    exit_fee = _fee_usd(entry_size_usd, fee_percent)
+                    pnl_net = pnl - exit_fee
+                    realized += pnl_net
+                    cum += pnl_net
+                    trades.append(
+                        Trade("SHORT", entry_ts, entry_price, ts[i], exit_px, pnl_net, "STOP_SHORT", cum)
+                    )
+                    pos = 0
                     equity[-1] = realized
                     continue
 
@@ -393,7 +382,17 @@ def backtest_strategy3(
                     pos = 0
                     equity[-1] = realized
                     continue
-                _close_position(i, px, "NO_TRADE")
+                exit_side = "SELL" if pos == 1 else "BUY"
+                exit_px = _apply_fill_px(px, exit_side, slippage_ticks, spread_ticks, tick_size)
+                pnl = entry_size_usd * pos * (exit_px - entry_price) / entry_price
+                exit_fee = _fee_usd(entry_size_usd, fee_percent)
+                pnl_net = pnl - exit_fee
+                realized += pnl_net
+                cum += pnl_net
+                trades.append(
+                    Trade("LONG" if pos == 1 else "SHORT", entry_ts, entry_price, ts[i], exit_px, pnl_net, "NO_TRADE", cum)
+                )
+                pos = 0
                 equity[-1] = realized
             continue
 
@@ -427,20 +426,47 @@ def backtest_strategy3(
                 pos = 0
                 equity[-1] = realized
             else:
-                _close_position(i, px, "ST_FLIP")
-                equity[-1] = realized
+                exit_side = "BUY"
+            exit_px = _apply_fill_px(px, exit_side, slippage_ticks, spread_ticks, tick_size)
+            pnl = entry_size_usd * pos * (exit_px - entry_price) / entry_price
+            exit_fee = _fee_usd(entry_size_usd, fee_percent)
+            pnl_net = pnl - exit_fee
+            realized += pnl_net
+            cum += pnl_net
+            trades.append(Trade("SHORT", entry_ts, entry_price, ts[i], exit_px, pnl_net, "ST_FLIP", cum))
+            pos = 0
+            equity[-1] = realized
 
         if flip_to_short and pos == 1:
             if entry_price <= 0:
                 pos = 0
                 equity[-1] = realized
             else:
-                _close_position(i, px, "ST_FLIP")
-                equity[-1] = realized
+                exit_side = "SELL"
+            exit_px = _apply_fill_px(px, exit_side, slippage_ticks, spread_ticks, tick_size)
+            pnl = entry_size_usd * pos * (exit_px - entry_price) / entry_price
+            exit_fee = _fee_usd(entry_size_usd, fee_percent)
+            pnl_net = pnl - exit_fee
+            realized += pnl_net
+            cum += pnl_net
+            trades.append(Trade("LONG", entry_ts, entry_price, ts[i], exit_px, pnl_net, "ST_FLIP", cum))
+            pos = 0
+            equity[-1] = realized
 
         # open new
         if pos == 0:
-            _open_position(i, 1 if flip_to_long else -1, px)
+            entry_size_usd = _calc_entry_size_usd()
+            pos = 1 if flip_to_long else -1
+            entry_ts = ts[i]
+            # Entry fill with spread+slippage
+            entry_side = "BUY" if pos == 1 else "SELL"
+            entry_price = _apply_fill_px(px, entry_side, slippage_ticks, spread_ticks, tick_size)
+            # Entry fee charged immediately
+            entry_fee = _fee_usd(entry_size_usd, fee_percent)
+            realized -= entry_fee
+            cum -= entry_fee
+            last_flip_time = ts[i]
+            flips_today += 1
 
     open_position: Optional[dict] = None
     if pos != 0:
@@ -457,7 +483,26 @@ def backtest_strategy3(
 
         if close_at_end:
             # Force-close the position on the last candle (useful for pure backtests).
-            _close_position(last_i, cur_px, "END")
+            exit_side = "SELL" if pos == 1 else "BUY"
+            exit_px = _apply_fill_px(cur_px, exit_side, slippage_ticks, spread_ticks, tick_size)
+            pnl = entry_size_usd * pos * (exit_px - entry_price) / entry_price
+            exit_fee = _fee_usd(entry_size_usd, fee_percent)
+            pnl_net = pnl - exit_fee
+            realized += pnl_net
+            cum += pnl_net
+            trades.append(
+                Trade(
+                    "LONG" if pos == 1 else "SHORT",
+                    entry_ts,
+                    entry_price,
+                    ts[last_i],
+                    exit_px,
+                    pnl_net,
+                    "END",
+                    cum,
+                )
+            )
+            pos = 0
             if equity:
                 equity[-1] = realized
         else:

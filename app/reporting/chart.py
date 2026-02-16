@@ -52,19 +52,16 @@ PARAM_HELP = {
     "atr_len": "ATR период для авар. SL",
     "atr_mult": "Множитель ATR для SL",
     "close_at_end": "Закрыть позицию в конце окна",
-    "fee_percent": "Комиссия биржи на сторону (%)",
-    "spread_ticks": "Спред (в тиках, полный bid-ask)",
-    "funding_8h_percent": "Funding за 8 часов (%)",
 }
 
 # Params that participate in strategy3 optimization and can be edited on the chart page.
 EDITABLE_STRAT3_KEYS = [
-    "leverage_mult",
+"leverage_mult",
     "trade_from_current_capital",
-    "fee_percent",
-    "spread_ticks",
     "slippage_ticks",
     "tick_size",
+    "fee_percent",
+    "spread_ticks",
     "funding_8h_percent",
     "use_no_trade",
     "adx_no_trade_below",
@@ -74,6 +71,7 @@ EDITABLE_STRAT3_KEYS = [
     "max_flips_per_day",
     "atr_mult",
 ]
+
 # Extra UI-only editable key (does not affect backtest, only % metrics)
 EDITABLE_UI_STRAT3_KEYS = set(EDITABLE_STRAT3_KEYS + ["capital_usd"])
 
@@ -108,10 +106,10 @@ def _build_plot_html(
             "leverage_mult": None,
             "trade_from_current_capital": False,
             "slippage_ticks": 2,
+            "tick_size": 0.0001,
             "fee_percent": 0.06,
             "spread_ticks": 1.0,
             "funding_8h_percent": 0.01,
-            "tick_size": 0.0001,
             "adx_len": 14,
             "adx_smooth": 14,
             "adx_no_trade_below": 14.0,
@@ -804,9 +802,9 @@ def make_chart_html(
         if k == "tick_size":
             step = "0.0001"
         elif k in ("fee_percent", "funding_8h_percent"):
-            step = "0.001"
+            step = "0.01"
         elif k == "spread_ticks":
-            step = "0.1"
+            step = "0.5"
         else:
             step = "1" if is_int else "0.1"
         try:

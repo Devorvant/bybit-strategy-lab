@@ -117,9 +117,10 @@ def chart(
     p_trade_from_current_capital: bool | None = Query(None),
     p_slippage_ticks: int | None = Query(None, ge=0, le=1000),
     p_tick_size: float | None = Query(None, ge=0.0, le=1e6),
-    p_fee_percent: float | None = Query(None, ge=0.0, le=10.0),
+    p_fee_percent: float | None = Query(None, ge=0.0, le=100.0),
     p_spread_ticks: float | None = Query(None, ge=0.0, le=1000.0),
-    p_funding_8h_percent: float | None = Query(None, ge=-10.0, le=10.0),
+    p_funding_8h_percent: float | None = Query(None, ge=-100.0, le=100.0),
+
     p_use_no_trade: bool | None = Query(None),
     p_adx_no_trade_below: float | None = Query(None, ge=0.0, le=100.0),
     p_st_factor: float | None = Query(None, ge=0.0, le=100.0),

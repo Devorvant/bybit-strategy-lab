@@ -1,9 +1,11 @@
 import asyncio
+import time
 from typing import List
 
 import json
 
 from fastapi import FastAPI, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
 from app.config import settings
 from app.storage.db import init_db, load_bars, last_signal
@@ -12,6 +14,7 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 from app.reporting.tv_debug import router as tv_debug_router
 app.include_router(tv_debug_router)
@@ -20,7 +23,24 @@ from app.reporting.tv_ingest import router as tv_ingest_router
 app.include_router(tv_ingest_router)
 
 from app.reporting.optimize_web import router as optimize_router
-app.include_router(optimize_router)
+app.include_router(optimi
+# Simple in-memory TTL cache for bar queries (helps when reloading /chart multiple times)
+_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts, rows)
+_BARS_CACHE_TTL_SEC = 20.0
+
+def _load_bars_cached(symbol: str, tf: str, limit: int):
+    key = (symbol, tf, int(limit))
+    now = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else time.time()
+    item = _BARS_CACHE.get(key)
+    if item:
+        t0, rows = item
+        if now - t0 <= _BARS_CACHE_TTL_SEC:
+            return rows
+    rows = _load_bars_cached(symbol, tf, limit=limit)
+    _BARS_CACHE[key] = (now, rows)
+    return rows
+
+ze_router)
 
 conn = None
 
@@ -92,7 +112,7 @@ def health():
 @app.get("/bars")
 def bars(symbol: str = Query("APTUSDT"), tf: str = Query(None), limit: int = Query(500, ge=10, le=50000)):
     tf = tf or settings.TF
-    rows = load_bars(conn, symbol.upper(), tf, limit=limit)
+    rows = _load_bars_cached(symbol.upper(), tf, limit=limit)
     return {"symbol": symbol.upper(), "tf": tf, "bars": rows}
 
 @app.get("/signal")

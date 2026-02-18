@@ -1079,6 +1079,12 @@ def make_chart_html(
     .tf-btn.active {{ background: #1b5cff33; border-color: #2b6dff; }}
     .apply {{ background: #2b6dff; border: 0; color: #fff; padding: 8px 12px; border-radius: 10px; cursor: pointer; font-weight: 600; }}
     .wrap {{ padding: 10px 14px 20px 14px; }}
+    .plot-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+    .plot-inner {{ width: 100%; }}
+    @media (max-width: 760px) {{
+      .plot-inner {{ min-width: 200vw; }}
+    }}
+
     .trades-wrap {{ margin-top: 10px; }}
     .trades-metrics {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 18px; font-size: 13px; margin: 8px 0 12px 0; }}
     .trades-table table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
@@ -1117,19 +1123,7 @@ def make_chart_html(
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
     }}
-  
-    /* Chart wrapper: allow wide chart on mobile without breaking desktop */
-    .plot-scroll {{ width: 100%; overflow-x: hidden; }}
-    .plot-inner {{ width: 100%; }}
-
-    @media (max-width: 760px) {{
-      .plot-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
-      .plot-inner {{ min-width: 200vw; display: inline-block; }}
-      /* ensure plotly uses full inner width */
-      .plot-inner .plotly-graph-div {{ min-width: 200vw; }}
-    }}
-
-</style>
+  </style>
   <script>
     function __setOverridesEnabled(enabled) {{
       const els = document.querySelectorAll("[data-ov='1']");

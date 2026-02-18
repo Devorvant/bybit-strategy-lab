@@ -162,6 +162,30 @@ def load_bars(conn, symbol: str, tf: str, limit: int = 500):
     return list(reversed(rows))
 
 
+def load_bars_before(conn, symbol: str, tf: str, end_ts: int, limit: int = 500):
+    """Load the most recent `limit` bars with ts <= end_ts.
+
+    Returns bars in ascending timestamp order.
+
+    Args:
+        end_ts: inclusive candle open timestamp in ms.
+    """
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ts,o,h,l,c,v FROM bars WHERE symbol=%s AND tf=%s AND ts<=%s ORDER BY ts DESC LIMIT %s",
+                (symbol, tf, end_ts, limit),
+            )
+            rows = cur.fetchall()
+    else:
+        cur = conn.execute(
+            "SELECT ts,o,h,l,c,v FROM bars WHERE symbol=? AND tf=? AND ts<=? ORDER BY ts DESC LIMIT ?",
+            (symbol, tf, end_ts, limit),
+        )
+        rows = cur.fetchall()
+    return list(reversed(rows))
+
+
 def bars_min_max_ts(conn, symbol: str, tf: str) -> Tuple[Optional[int], Optional[int]]:
     """Return (min_ts, max_ts) for stored bars."""
     if _is_postgres():

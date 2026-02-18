@@ -612,30 +612,7 @@ def _build_trades_table_html(bt, bars=None, params=None) -> str:
         <div><b>Ср. PnL / сделка:</b> {avg_pnl:,.2f} USD</div>
       </div>
 
-      
-
-<script>
-(function(){
-  function tryResize(){
-    try{
-      var gd = document.querySelector('.plot-inner .js-plotly-plot');
-      if (gd && window.Plotly && Plotly.Plots && Plotly.Plots.resize) {
-        Plotly.Plots.resize(gd);
-        return true;
-      }
-    }catch(e){}
-    return false;
-  }
-  window.addEventListener('load', function(){
-    var tries = 0;
-    var h = setInterval(function(){
-      tries += 1;
-      if (tryResize() || tries > 20) clearInterval(h);
-    }, 150);
-  });
-})();
-</script>
-<div class="trades-table">
+      <div class="trades-table">
         <table>
           <thead>
             <tr>
@@ -1132,18 +1109,16 @@ def make_chart_html(
     .p-in {{ width: 100%; background: #0b1220; color: #e6e6e6; border: 1px solid #1b2940; border-radius: 8px; padding: 5px 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }}
     .p-in:focus {{ outline: none; border-color: #2b6dff; box-shadow: 0 0 0 2px #2b6dff33; }}
 
-    @media (max-width: 760px) {
-/* Mobile: make plot area horizontally wider + scrollable */
-.plot-scroll { overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
-.plot-inner { width: 200vw; display: block; }
-.plot-inner .js-plotly-plot, .plot-inner .plotly-graph-div, .plot-inner .plotly, .plot-inner .plot-container { width: 200vw !important; }
-{
+    @media (max-width: 760px) {{
       .topbar label {{ font-size: 12px; }}
       select, input {{ flex: 1 1 140px; }}
       .apply {{ width: 100%; }}
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
+      .plot-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .plot-inner { width: 200vw; max-width: none; }
+      .plot-inner .js-plotly-plot, .plot-inner .plotly-graph-div { width: 200vw !important; min-width: 200vw !important; }
     }}
   </style>
   <script>
@@ -1231,7 +1206,7 @@ def make_chart_html(
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>
-  <div class="wrap">{params_html}{plot_html}{trades_table_html}</div>
+  <div class="wrap">{params_html}<div class="plot-scroll"><div class="plot-inner">{plot_html}</div></div>{trades_table_html}</div>
 </body>
 </html>
 """

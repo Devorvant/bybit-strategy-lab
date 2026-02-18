@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import datetime
 import html
+import json
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 
 from app.backtest.sma_backtest import backtest_sma_cross
@@ -407,7 +409,11 @@ def build_plotly_payload(
     )
     if err_html is not None or fig is None:
         return {"ok": False, "error_html": err_html or "<div>error</div>"}
-    pj = fig.to_plotly_json()
+
+    # IMPORTANT: fig.to_plotly_json() may contain numpy/pandas objects (datetime64,
+    # ndarray, etc.) that FastAPI can't JSON-encode. Convert via Plotly's JSON
+    # serializer to guarantee plain JSON types.
+    pj = json.loads(pio.to_json(fig, validate=False))
     return {
         "ok": True,
         "data": pj.get("data", []),

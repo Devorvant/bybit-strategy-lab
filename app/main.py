@@ -2,11 +2,10 @@ import asyncio
 from typing import List
 
 import json
-import time
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
-from fastapi.middleware.gzip import GZipMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 from app.config import settings
 from app.storage.db import init_db, load_bars, last_signal
 from app.data.bybit_ws import ws_collect
@@ -14,7 +13,7 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
-# Compress large Plotly HTML/JSON responses (big speedup for 20k bars)
+
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 from app.reporting.tv_debug import router as tv_debug_router
@@ -80,10 +79,6 @@ def _db_distinct_tfs(symbol: str) -> List[str]:
 async def startup():
     global conn
     conn = init_db()
-
-# Tiny in-memory cache for recent bars queries (helps when you tweak UI fields)
-_BARS_CACHE = {}  # key -> (ts_sec, rows)
-_BARS_CACHE_TTL = 20.0
     # Backfill истории (опционально, по env BACKFILL_ON_START)
     asyncio.create_task(backfill_on_startup(conn))
     # фоновый сбор свечей
@@ -140,14 +135,7 @@ def chart(
 ):
     tf = tf or settings.TF
     symbol = symbol.upper()
-    cache_key = (symbol, tf, int(limit))
-    now_s = time.time()
-    hit = _BARS_CACHE.get(cache_key)
-    if hit and (now_s - float(hit[0]) < _BARS_CACHE_TTL):
-        rows = hit[1]
-    else:
-        rows = load_bars(conn, symbol, tf, limit=limit)
-        _BARS_CACHE[cache_key] = (now_s, rows)
+    rows = load_bars(conn, symbol, tf, limit=limit)
 
     # For UI controls
     symbols = _db_distinct_symbols()

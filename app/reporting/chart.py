@@ -1116,14 +1116,12 @@ def make_chart_html(
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
-    }}
-
-    /* Mobile: make the Plotly chart ~2x wider and scrollable horizontally */
-    .plot-scroll {{ overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }}
-    .plot-inner {{ width: 100%; }}
-    .plot-inner .js-plotly-plot, .plot-inner .plotly-graph-div {{ width: 100% !important; }}
-    @media (max-width: 760px) {{
-      .plot-inner {{ width: 200vw; }}
+      /* Mobile: make chart ~2x wider and scroll horizontally.
+         IMPORTANT: do NOT force Plotly's internal div to 200vw (it causes clipping on some Android browsers).
+         Instead, make the parent wider and let Plotly stay at width:100% of that parent. */
+      .plot-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .plot-inner { width: 200vw; max-width: none; display: block; }
+      .plot-inner .js-plotly-plot, .plot-inner .plotly-graph-div { width: 100% !important; min-width: 100% !important; }
     }}
   </style>
   <script>
@@ -1211,7 +1209,7 @@ def make_chart_html(
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>
-<div class="wrap">{params_html}<div class="plot-scroll"><div class="plot-inner">{plot_html}</div></div>{trades_table_html}</div>
+  <div class="wrap">{params_html}<div class="plot-scroll"><div class="plot-inner">{plot_html}</div></div>{trades_table_html}</div>
 </body>
 </html>
 """

@@ -1,11 +1,9 @@
 import asyncio
-import time
 from typing import List
 
 import json
 
 from fastapi import FastAPI, Query
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
 from app.config import settings
 from app.storage.db import init_db, load_bars, last_signal
@@ -14,7 +12,6 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
-app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 from app.reporting.tv_debug import router as tv_debug_router
 app.include_router(tv_debug_router)
@@ -26,31 +23,6 @@ from app.reporting.optimize_web import router as optimize_router
 app.include_router(optimize_router)
 
 conn = None
-
-# Simple in-memory cache for bars to speed up repeated chart reloads (especially with large limits like 20000)
-_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts_mono, rows)
-_BARS_CACHE_TTL_SEC = 20.0
-_BARS_CACHE_MAX_ITEMS = 32
-
-def _load_bars_cached(symbol: str, tf: str, limit: int):
-    key = (symbol, tf, int(limit))
-    now = time.monotonic()
-    hit = _BARS_CACHE.get(key)
-    if hit is not None:
-        t0, rows = hit
-        if (now - t0) <= _BARS_CACHE_TTL_SEC:
-            return rows
-    # IMPORTANT: call the real DB loader (not ourselves) — иначе будет рекурсия.
-    # (symbol/tf are normalized by the caller; we still upper-case symbol for safety)
-    rows = load_bars(conn, str(symbol).upper(), str(tf), limit=int(limit))
-    _BARS_CACHE[key] = (now, rows)
-    # trim
-    if len(_BARS_CACHE) > _BARS_CACHE_MAX_ITEMS:
-        # remove oldest
-        oldest = sorted(_BARS_CACHE.items(), key=lambda kv: kv[1][0])[: max(1, len(_BARS_CACHE) - _BARS_CACHE_MAX_ITEMS)]
-        for k, _ in oldest:
-            _BARS_CACHE.pop(k, None)
-    return rows
 
 
 def _is_postgres() -> bool:
@@ -120,7 +92,7 @@ def health():
 @app.get("/bars")
 def bars(symbol: str = Query("APTUSDT"), tf: str = Query(None), limit: int = Query(500, ge=10, le=50000)):
     tf = tf or settings.TF
-    rows = _load_bars_cached(symbol.upper(), tf, limit)
+    rows = load_bars(conn, symbol.upper(), tf, limit=limit)
     return {"symbol": symbol.upper(), "tf": tf, "bars": rows}
 
 @app.get("/signal")
@@ -160,7 +132,7 @@ def chart(
 ):
     tf = tf or settings.TF
     symbol = symbol.upper()
-    rows = _load_bars_cached(symbol, tf, limit)
+    rows = load_bars(conn, symbol, tf, limit=limit)
 
     # For UI controls
     symbols = _db_distinct_symbols()

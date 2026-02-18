@@ -1117,7 +1117,19 @@ def make_chart_html(
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
     }}
-  </style>
+  
+    /* Chart wrapper: allow wide chart on mobile without breaking desktop */
+    .plot-scroll {{ width: 100%; overflow-x: hidden; }}
+    .plot-inner {{ width: 100%; }}
+
+    @media (max-width: 760px) {{
+      .plot-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+      .plot-inner {{ min-width: 200vw; display: inline-block; }}
+      /* ensure plotly uses full inner width */
+      .plot-inner .plotly-graph-div {{ min-width: 200vw; }}
+    }}
+
+</style>
   <script>
     function __setOverridesEnabled(enabled) {{
       const els = document.querySelectorAll("[data-ov='1']");
@@ -1203,7 +1215,7 @@ def make_chart_html(
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>
-  <div class="wrap">{params_html}{plot_html}{trades_table_html}</div>
+  <div class="wrap">{params_html}<div class="plot-scroll"><div class="plot-inner">{plot_html}</div></div>{trades_table_html}</div>
 </body>
 </html>
 """

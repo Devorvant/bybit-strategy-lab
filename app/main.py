@@ -1,8 +1,8 @@
 import asyncio
-import time
 from typing import List
 
 import json
+import time
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.gzip import GZipMiddleware
@@ -14,7 +14,23 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
+
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Simple in-memory bars cache to speed up repeated chart reloads
+_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts, bars)
+_BARS_CACHE_TTL_SEC = 20
+
+def load_bars_cached(symbol: str, tf: str, limit: int):
+    key = (symbol.upper(), str(tf), int(limit))
+    now = time.time()
+    ts, bars = _BARS_CACHE.get(key, (0.0, None))
+    if bars is not None and (now - ts) < _BARS_CACHE_TTL_SEC:
+        return bars
+    bars = load_bars(conn, symbol.upper(), tf, limit=limit)
+    _BARS_CACHE[key] = (now, bars)
+    return bars
+
 
 from app.reporting.tv_debug import router as tv_debug_router
 app.include_router(tv_debug_router)
@@ -23,24 +39,7 @@ from app.reporting.tv_ingest import router as tv_ingest_router
 app.include_router(tv_ingest_router)
 
 from app.reporting.optimize_web import router as optimize_router
-app.include_router(optimi
-# Simple in-memory TTL cache for bar queries (helps when reloading /chart multiple times)
-_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts, rows)
-_BARS_CACHE_TTL_SEC = 20.0
-
-def _load_bars_cached(symbol: str, tf: str, limit: int):
-    key = (symbol, tf, int(limit))
-    now = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else time.time()
-    item = _BARS_CACHE.get(key)
-    if item:
-        t0, rows = item
-        if now - t0 <= _BARS_CACHE_TTL_SEC:
-            return rows
-    rows = _load_bars_cached(symbol, tf, limit=limit)
-    _BARS_CACHE[key] = (now, rows)
-    return rows
-
-ze_router)
+app.include_router(optimize_router)
 
 conn = None
 
@@ -112,7 +111,7 @@ def health():
 @app.get("/bars")
 def bars(symbol: str = Query("APTUSDT"), tf: str = Query(None), limit: int = Query(500, ge=10, le=50000)):
     tf = tf or settings.TF
-    rows = _load_bars_cached(symbol.upper(), tf, limit=limit)
+    rows = load_bars_cached(symbol.upper(), tf, limit)
     return {"symbol": symbol.upper(), "tf": tf, "bars": rows}
 
 @app.get("/signal")

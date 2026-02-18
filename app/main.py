@@ -5,7 +5,6 @@ import json
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
-from starlette.middleware.gzip import GZipMiddleware
 from app.config import settings
 from app.storage.db import init_db, load_bars, last_signal
 from app.data.bybit_ws import ws_collect
@@ -13,8 +12,6 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
-
-app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 from app.reporting.tv_debug import router as tv_debug_router
 app.include_router(tv_debug_router)

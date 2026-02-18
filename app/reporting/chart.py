@@ -1129,8 +1129,8 @@ def make_chart_html(
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
-      .plot-inner { min-width: 200vw; }
-      .plot-scroll { padding-bottom: 6px; }
+      .plot-inner {{ min-width: 200vw; }}
+      .plot-scroll {{ padding-bottom: 6px; }}
 
     }}
   </style>

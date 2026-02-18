@@ -1,11 +1,12 @@
 import asyncio
+import time
 from typing import List
 
 import json
 
 from fastapi import FastAPI, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse
-from starlette.middleware.gzip import GZipMiddleware
 from app.config import settings
 from app.storage.db import init_db, load_bars, last_signal
 from app.data.bybit_ws import ws_collect
@@ -13,7 +14,6 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
-
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 from app.reporting.tv_debug import router as tv_debug_router
@@ -27,22 +27,29 @@ app.include_router(optimize_router)
 
 conn = None
 
-import time
-
-_BARS_CACHE: dict[tuple[str, str, int], tuple[float, list]] = {}
+# Simple in-memory cache for bars to speed up repeated chart reloads (especially with large limits like 20000)
+_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts_mono, rows)
 _BARS_CACHE_TTL_SEC = 20.0
+_BARS_CACHE_MAX_ITEMS = 32
 
 def _load_bars_cached(symbol: str, tf: str, limit: int):
-    """Small in-memory TTL cache for charts/bars to speed up repeated reloads."""
     key = (symbol, tf, int(limit))
-    now = time.time()
+    now = time.monotonic()
     hit = _BARS_CACHE.get(key)
     if hit is not None:
-        ts, rows = hit
-        if (now - ts) <= _BARS_CACHE_TTL_SEC:
+        t0, rows = hit
+        if (now - t0) <= _BARS_CACHE_TTL_SEC:
             return rows
-    rows = _load_bars_cached(symbol, tf, limit)
+    # IMPORTANT: call the real DB loader (not ourselves) — иначе будет рекурсия.
+    # (symbol/tf are normalized by the caller; we still upper-case symbol for safety)
+    rows = load_bars(conn, str(symbol).upper(), str(tf), limit=int(limit))
     _BARS_CACHE[key] = (now, rows)
+    # trim
+    if len(_BARS_CACHE) > _BARS_CACHE_MAX_ITEMS:
+        # remove oldest
+        oldest = sorted(_BARS_CACHE.items(), key=lambda kv: kv[1][0])[: max(1, len(_BARS_CACHE) - _BARS_CACHE_MAX_ITEMS)]
+        for k, _ in oldest:
+            _BARS_CACHE.pop(k, None)
     return rows
 
 

@@ -1131,24 +1131,10 @@ def make_chart_html(
       .p-v {{ margin-bottom: 6px; }}
       .plot-inner {{ min-width: 200vw; }}
       .plot-scroll {{ padding-bottom: 6px; }}
-
-      /*
-        Mobile touch behavior:
-        - 1 finger: pan (Plotly dragmode=pan)
-        - 2 fingers: pinch-zoom
-
-        iOS Safari/Chrome often won't pass pinch gestures to JS unless
-        touch-action allows it (or is disabled). Plotly handles the gesture
-        itself, so we disable the browser's default handling inside the plot.
-      */
-      .js-plotly-plot, .plotly, .plot-container, .plotly-graph-div {{
-        touch-action: none;
-        -webkit-user-select: none;
-        user-select: none;
-      }}
-      .plot-scroll {{
-        overscroll-behavior: contain;
-      }}
+      .plot-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }}
+      .plot-inner {{ width: max-content; }}
+      /* Allow Plotly to receive pinch gestures (iOS/Safari) */
+      .js-plotly-plot, .plotly, .plot-container, .plotly-graph-div {{ touch-action: pan-y pinch-zoom; }}
 
     }}
   </style>

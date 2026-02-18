@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime
 import html
+import math
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -95,6 +96,13 @@ def _build_plot_html(
 
     df = pd.DataFrame(bars, columns=["ts", "o", "h", "l", "c", "v"])
     df["dt"] = pd.to_datetime(df["ts"], unit="ms")
+
+    df_plot = df
+    # Downsample only for Plotly rendering (backtest still runs on full df)
+    MAX_PLOT_POINTS = 6000
+    if len(df) > MAX_PLOT_POINTS:
+        step = int(math.ceil(len(df) / MAX_PLOT_POINTS))
+        df_plot = df.iloc[::step].copy()
 
     # Indicators (keep in sync with strategy defaults)
     df["sma20"] = df["c"].rolling(20).mean()

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import datetime
 import html
-import math
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -96,13 +95,6 @@ def _build_plot_html(
 
     df = pd.DataFrame(bars, columns=["ts", "o", "h", "l", "c", "v"])
     df["dt"] = pd.to_datetime(df["ts"], unit="ms")
-
-    df_plot = df
-    # Downsample only for Plotly rendering (backtest still runs on full df)
-    MAX_PLOT_POINTS = 6000
-    if len(df) > MAX_PLOT_POINTS:
-        step = int(math.ceil(len(df) / MAX_PLOT_POINTS))
-        df_plot = df.iloc[::step].copy()
 
     # Indicators (keep in sync with strategy defaults)
     df["sma20"] = df["c"].rolling(20).mean()
@@ -222,11 +214,11 @@ def _build_plot_html(
     fig.add_trace(
         go.Candlestick(
             name="OHLC",
-            x=df_plot["dt"],
-            open=df_plot["o"],
-            high=df_plot["h"],
-            low=df_plot["l"],
-            close=df_plot["c"],
+            x=df["dt"],
+            open=df["o"],
+            high=df["h"],
+            low=df["l"],
+            close=df["c"],
         ),
         row=1,
         col=1,
@@ -237,7 +229,7 @@ def _build_plot_html(
         fig.add_trace(
             go.Scatter(
                 name="SMA20",
-                x=df_plot["dt"],
+                x=df["dt"],
                 y=df["sma20"],
                 mode="lines",
                 line=dict(width=2),
@@ -248,7 +240,7 @@ def _build_plot_html(
         fig.add_trace(
             go.Scatter(
                 name="SMA50",
-                x=df_plot["dt"],
+                x=df["dt"],
                 y=df["sma50"],
                 mode="lines",
                 line=dict(width=2),
@@ -326,14 +318,16 @@ def _build_plot_html(
     if bt.trades:
         entry_x, entry_y, entry_text, entry_sym = [], [], [], []
         exit_x, exit_y, exit_text = [], [], []
+        ts_to_px = {int(t): float(px) for t, px in zip(df["ts"].tolist(), df["c"].tolist())}
+
         for tr in bt.trades:
             entry_x.append(pd.to_datetime(tr.entry_ts, unit="ms"))
-            entry_y.append(float(tr.entry_price))
+            entry_y.append(ts_to_px.get(tr.entry_ts, tr.entry_price))
             entry_sym.append("triangle-up" if tr.side == "LONG" else "triangle-down")
             entry_text.append(f"{tr.side} entry<br>px={tr.entry_price:.6g}<br>ts={tr.entry_ts}")
 
             exit_x.append(pd.to_datetime(tr.exit_ts, unit="ms"))
-            exit_y.append(float(tr.exit_price))
+            exit_y.append(ts_to_px.get(tr.exit_ts, tr.exit_price))
             exit_text.append(f"{tr.side} exit<br>px={tr.exit_price:.6g}<br>pnl={tr.pnl:.2f} USD")
 
         fig.add_trace(
@@ -383,7 +377,6 @@ def _build_plot_html(
     # Styling
     fig.update_layout(
         height=760,
-        dragmode="pan",  # mobile: one-finger pan, pinch zoom
         template="plotly_dark",
         paper_bgcolor="#0b1220",
         plot_bgcolor="#0b1220",
@@ -391,13 +384,7 @@ def _build_plot_html(
         margin=dict(l=20, r=20, t=20, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
-    return fig.to_html(include_plotlyjs="cdn", full_html=False, config={
-        "responsive": True,
-        "displayModeBar": False,
-        "scrollZoom": True,  # enables pinch-zoom on mobile
-        "doubleClick": False,
-        "displaylogo": False,
-    })
+    return fig.to_html(include_plotlyjs="cdn", full_html=False)
 
 
 def _build_trades_table_html(bt, bars=None, params=None) -> str:
@@ -1129,9 +1116,6 @@ def make_chart_html(
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
-      .plot-inner {{ min-width: 200vw; }}
-      .plot-scroll {{ padding-bottom: 6px; }}
-
     }}
   </style>
   <script>
@@ -1219,9 +1203,7 @@ def make_chart_html(
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>
-  <div class="wrap">{params_html}<div class='plot-scroll'><div class='plot-inner'>
-{plot_html}
-</div></div>{trades_table_html}</div>
+  <div class="wrap">{params_html}{plot_html}{trades_table_html}</div>
 </body>
 </html>
 """

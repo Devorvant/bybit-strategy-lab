@@ -1129,12 +1129,12 @@ def make_chart_html(
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
-      .plot-inner {{ min-width: 200vw; }}
-      .plot-scroll {{ padding-bottom: 6px; }}
-      .plot-scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }}
-      .plot-inner {{ width: max-content; }}
-      /* Allow Plotly to receive pinch gestures (iOS/Safari) */
-      .js-plotly-plot, .plotly, .plot-container, .plotly-graph-div {{ touch-action: pan-y pinch-zoom; }}
+      .plot-scroll {{ overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }}
+.plot-inner {{ min-width: 200vw; display: inline-block; }}
+/* Let Plotly receive pinch-zoom on Android/iOS (1 finger pan via dragmode=pan, 2 fingers pinch-zoom via scrollZoom=true) */
+.js-plotly-plot, .plotly, .plot-container, .plotly-graph-div {{ touch-action: pan-y pinch-zoom; }}
+/* Force Plotly canvas to use the wider container */
+.plot-inner .plotly-graph-div {{ width: 200vw !important; }}
 
     }}
   </style>

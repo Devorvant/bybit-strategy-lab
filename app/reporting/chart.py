@@ -1116,9 +1116,14 @@ def make_chart_html(
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
-      .plot-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-      .plot-inner { width: 200vw; max-width: none; }
-      .plot-inner .js-plotly-plot, .plot-inner .plotly-graph-div { width: 200vw !important; min-width: 200vw !important; }
+    }}
+
+    /* Mobile: make the Plotly chart ~2x wider and scrollable horizontally */
+    .plot-scroll {{ overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }}
+    .plot-inner {{ width: 100%; }}
+    .plot-inner .js-plotly-plot, .plot-inner .plotly-graph-div {{ width: 100% !important; }}
+    @media (max-width: 760px) {{
+      .plot-inner {{ width: 200vw; }}
     }}
   </style>
   <script>
@@ -1206,7 +1211,7 @@ def make_chart_html(
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>
-  <div class="wrap">{params_html}<div class="plot-scroll"><div class="plot-inner">{plot_html}</div></div>{trades_table_html}</div>
+<div class="wrap">{params_html}<div class="plot-scroll"><div class="plot-inner">{plot_html}</div></div>{trades_table_html}</div>
 </body>
 </html>
 """

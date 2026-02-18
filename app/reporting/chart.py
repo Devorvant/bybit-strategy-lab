@@ -1129,12 +1129,40 @@ def make_chart_html(
       .params-grid {{ grid-template-columns: 1fr; }}
       .p-d {{ grid-column: 1 / -1; }}
       .p-v {{ margin-bottom: 6px; }}
-      .plot-scroll {{ overflow-x: auto; padding-bottom: 8px; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }}
-.plot-inner {{ min-width: 200vw; display: inline-block; }}
-/* Let Plotly receive pinch-zoom on Android/iOS (1 finger pan via dragmode=pan, 2 fingers pinch-zoom via scrollZoom=true) */
-.js-plotly-plot, .plotly, .plot-container, .plotly-graph-div {{ touch-action: pan-y pinch-zoom; }}
-/* Force Plotly canvas to use the wider container */
-.plot-inner .plotly-graph-div {{ width: 200vw !important; }}
+      /* Make the plot wider on phones and allow horizontal scrolling */
+      .plot-scroll {{
+        padding-bottom: 6px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+      }}
+      .plot-inner {{ min-width: 200vw; display: inline-block; }}
+
+      /*
+        Mobile touch behavior:
+        - 1 finger: pan (Plotly dragmode=pan)
+        - 2 fingers: pinch-zoom
+
+        iOS Safari/Chrome often won't pass pinch gestures to JS unless
+        touch-action allows it (or is disabled). Plotly handles the gesture
+        itself, so we disable the browser's default handling inside the plot.
+      */
+      /*
+        Android/Chrome: allow Plotly to receive pinch gestures.
+        - 1 finger: pan (Plotly dragmode=pan)
+        - 2 fingers: pinch-zoom
+      */
+      .js-plotly-plot, .plotly, .plot-container, .plotly-graph-div {{
+        touch-action: pan-y pinch-zoom;
+        -webkit-user-select: none;
+        user-select: none;
+      }}
+
+      /* Ensure Plotly expands to the widened container */
+      .plot-inner .plotly-graph-div {{
+        width: 200vw !important;
+      }}
 
     }}
   </style>

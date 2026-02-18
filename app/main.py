@@ -1,8 +1,8 @@
 import asyncio
+import time
 from typing import List
 
 import json
-import time
 
 from fastapi import FastAPI, Query
 from fastapi.middleware.gzip import GZipMiddleware
@@ -14,23 +14,7 @@ from app.data.backfill import backfill_on_startup
 from app.reporting.chart import make_chart_html
 
 app = FastAPI()
-
 app.add_middleware(GZipMiddleware, minimum_size=1000)
-
-# Simple in-memory bars cache to speed up repeated chart reloads
-_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts, bars)
-_BARS_CACHE_TTL_SEC = 20
-
-def load_bars_cached(symbol: str, tf: str, limit: int):
-    key = (symbol.upper(), str(tf), int(limit))
-    now = time.time()
-    ts, bars = _BARS_CACHE.get(key, (0.0, None))
-    if bars is not None and (now - ts) < _BARS_CACHE_TTL_SEC:
-        return bars
-    bars = load_bars(conn, symbol.upper(), tf, limit=limit)
-    _BARS_CACHE[key] = (now, bars)
-    return bars
-
 
 from app.reporting.tv_debug import router as tv_debug_router
 app.include_router(tv_debug_router)
@@ -42,6 +26,29 @@ from app.reporting.optimize_web import router as optimize_router
 app.include_router(optimize_router)
 
 conn = None
+
+# Simple in-memory cache for bars to speed up repeated chart reloads (especially with large limits like 20000)
+_BARS_CACHE = {}  # (symbol, tf, limit) -> (ts_mono, rows)
+_BARS_CACHE_TTL_SEC = 20.0
+_BARS_CACHE_MAX_ITEMS = 32
+
+def _load_bars_cached(symbol: str, tf: str, limit: int):
+    key = (symbol, tf, int(limit))
+    now = time.monotonic()
+    hit = _BARS_CACHE.get(key)
+    if hit is not None:
+        t0, rows = hit
+        if (now - t0) <= _BARS_CACHE_TTL_SEC:
+            return rows
+    rows = _load_bars_cached(symbol, tf, limit)
+    _BARS_CACHE[key] = (now, rows)
+    # trim
+    if len(_BARS_CACHE) > _BARS_CACHE_MAX_ITEMS:
+        # remove oldest
+        oldest = sorted(_BARS_CACHE.items(), key=lambda kv: kv[1][0])[: max(1, len(_BARS_CACHE) - _BARS_CACHE_MAX_ITEMS)]
+        for k, _ in oldest:
+            _BARS_CACHE.pop(k, None)
+    return rows
 
 
 def _is_postgres() -> bool:
@@ -111,7 +118,7 @@ def health():
 @app.get("/bars")
 def bars(symbol: str = Query("APTUSDT"), tf: str = Query(None), limit: int = Query(500, ge=10, le=50000)):
     tf = tf or settings.TF
-    rows = load_bars_cached(symbol.upper(), tf, limit)
+    rows = _load_bars_cached(symbol.upper(), tf, limit)
     return {"symbol": symbol.upper(), "tf": tf, "bars": rows}
 
 @app.get("/signal")
@@ -151,7 +158,7 @@ def chart(
 ):
     tf = tf or settings.TF
     symbol = symbol.upper()
-    rows = load_bars(conn, symbol, tf, limit=limit)
+    rows = _load_bars_cached(symbol, tf, limit)
 
     # For UI controls
     symbols = _db_distinct_symbols()

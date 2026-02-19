@@ -778,6 +778,7 @@ def make_chart_html(
                 "atr_len": 14,
                 "atr_mult": 3.0,
                 "close_at_end": False,
+                "confirm_on_close": False,
             }
         elif strategy == "my_strategy3_tv_like.py":
             base = {

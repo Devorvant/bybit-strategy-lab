@@ -1150,7 +1150,9 @@ def make_chart_html(
         for k in PLAY_SPECS.keys():
             sel = 'selected' if k == play_param else ''
             opt_html.append(f"<option value='{k}' {sel}>{k}</option>")
-        specs_json = html.escape(json.dumps(PLAY_SPECS))
+        # Put raw JSON into <script type="application/json"> so JS can JSON.parse it.
+        # Avoid closing the script tag accidentally (</script>) by escaping "/" after "<".
+        specs_json = json.dumps(PLAY_SPECS).replace("</", "<\/")
         digits = int(spec.get('digits', 4))
         cur_v_s = f"{cur_v:.{digits}f}" if spec.get('kind') != 'int' else str(int(cur_v))
         slider_html = f"""

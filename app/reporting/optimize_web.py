@@ -1000,9 +1000,6 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     min_trades = int(cfg.get("min_trades", 5))
     optimizer = str(cfg.get("optimizer", "random")).lower().strip() or "random"
 
-    # Execution mode: signal on close(t-1), execute on open(t)
-    confirm_on_close = bool(cfg.get("confirm_on_close", False))
-
     # Optional: include execution costs inside the optimization loop.
     # If disabled, optimizer sees a "frictionless" backtest and costs are only
     # applied later in /chart.
@@ -1045,7 +1042,7 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
     _add_log(
         run,
         "RUN_CFG "
-        f"seed={seed} select_on={cfg.get('select_on','train')} optimizer={optimizer} end_shift_hours={cfg.get('end_shift_hours',0)} "f"confirm_on_close={confirm_on_close} "
+        f"seed={seed} select_on={cfg.get('select_on','train')} optimizer={optimizer} end_shift_hours={cfg.get('end_shift_hours',0)} "
         f"use_costs_in_opt={use_costs_in_opt} fixed_costs={json.dumps(fixed_costs, ensure_ascii=True)} "
         f"weights={json.dumps(weights, ensure_ascii=True)} min_trades={min_trades}",
     )
@@ -1105,7 +1102,8 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                 "val_score": float(s_va),
                 "train_score": float(s_tr),
                 "select_on": select_on,
-        "confirm_on_close": _b("confirm_on_close"),
+                # Execution mode (signal on close -> fill on next open)
+                "confirm_on_close": bool(confirm_on_close),
                 "use_costs_in_opt": bool(use_costs_in_opt),
                 "fixed_costs": fixed_costs if use_costs_in_opt else {},
                 "train_score_breakdown": bd_tr,
@@ -1172,7 +1170,6 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                     "use_emergency_sl": True,
                     "atr_len": 14,
                     "atr_mult": float(trial.suggest_float("atr_mult", 1.5, 5.0)),
-                    "confirm_on_close": bool(confirm_on_close),
                     "close_at_end": False,
                 }
 
@@ -1240,7 +1237,6 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                         break
 
                     params = _sample_params(rng_i, position_usd)
-                    params["confirm_on_close"] = bool(confirm_on_close)
                     params_eval = dict(params)
                     if use_costs_in_opt:
                         params_eval.update(fixed_costs)
@@ -1371,7 +1367,6 @@ def _run_optimizer_sync(run: RunState, bars: List[Tuple[int, float, float, float
                     break
 
                 params = _sample_params(rng, position_usd)
-                params["confirm_on_close"] = bool(confirm_on_close)
                 _maybe_update_best(params, trial)
 
                 if trial % max(1, trials // 20) == 0:
@@ -1732,13 +1727,6 @@ def _optimize_index_html(conn) -> str:
           <div>
             <label>train_frac</label>
             <input name='train_frac' value='0.7' style='width:90px'/>
-          </div>
-          <div>
-            <label><span class='lbl'>confirm_on_close<span class='tip' data-tip='Реалистичное исполнение по свечам.
-Если включено: сигнал считается по закрытию предыдущей свечи (t-1),
-а вход/выход исполняется на открытии текущей свечи (open t).'>?</span></span></label>
-            <input type='checkbox' name='confirm_on_close' id='confirm_on_close'/>
-          </div>
           </div>
           <div>
             <label>position_usd</label>

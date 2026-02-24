@@ -1279,8 +1279,6 @@ def make_chart_html(
                style="width:70px;padding:6px 8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;" />
         <input id="mt_qty_usd" type="number" step="0.01" min="0" placeholder="Size USD"
                style="width:70px;padding:6px 8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;" />
-        <input id="mt_qty_usd" type="number" step="0.01" min="0" placeholder="Size USD"
-               style="width:110px;padding:6px 8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;" />
         <input id="mt_sl_pct" type="number" step="0.01" placeholder="SL %"
                style="width:80px;padding:6px 8px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;" />
         <input id="mt_tp_pct" type="number" step="0.01" placeholder="TP %"

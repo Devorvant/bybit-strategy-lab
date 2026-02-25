@@ -17,7 +17,7 @@ from app.backtest.sma_backtest_tv_like import backtest_sma_cross_tv_like
 from app.backtest.strategy2_backtest import backtest_sma_adx_filter
 from app.backtest.strategy3_backtest import backtest_strategy3, atr
 from app.backtest.strategy3_backtest_tv_like import backtest_strategy3_tv_like
-
+ 
 
 # Common timeframe buttons (Bybit intervals)
 TF_BUTTONS: List[Tuple[str, str]] = [

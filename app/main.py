@@ -209,6 +209,7 @@ def chart(
     p_use_emergency_sl: bool | None = Query(None),
     p_atr_len: int | None = Query(None, ge=1, le=500),
     p_atr_mult: float | None = Query(None, ge=0.0, le=100.0),
+    p_min_hold_bars: int | None = Query(None, ge=0, le=500),
     p_close_at_end: bool | None = Query(None),
     p_confirm_on_close: bool | None = Query(None),
     signal_mode: str = Query("legacy"),
@@ -222,7 +223,7 @@ def chart(
             p_use_no_trade, p_adx_len, p_adx_smooth, p_adx_no_trade_below,
             p_st_atr_len, p_st_factor, p_use_rev_cooldown, p_rev_cooldown_hrs,
             p_use_flip_limit, p_max_flips_per_day, p_use_emergency_sl, p_atr_len, p_atr_mult,
-            p_close_at_end, p_confirm_on_close
+            p_min_hold_bars, p_close_at_end, p_confirm_on_close
         ]))
     tf = tf or settings.TF
     symbol = symbol.upper()
@@ -373,6 +374,8 @@ def chart(
             overrides["atr_len"] = int(p_atr_len)
         if p_atr_mult is not None:
             overrides["atr_mult"] = float(p_atr_mult)
+        if p_min_hold_bars is not None:
+            overrides["min_hold_bars"] = int(p_min_hold_bars)
         if p_close_at_end is not None:
             overrides["close_at_end"] = bool(p_close_at_end)
         if p_confirm_on_close is not None:
@@ -439,6 +442,7 @@ def api_chart_update(
     p_use_emergency_sl: bool | None = Query(None),
     p_atr_len: int | None = Query(None, ge=1, le=500),
     p_atr_mult: float | None = Query(None, ge=0.0, le=100.0),
+    p_min_hold_bars: int | None = Query(None, ge=0, le=500),
     p_close_at_end: bool | None = Query(None),
     p_confirm_on_close: bool | None = Query(None),
     signal_mode: str = Query("legacy"),
@@ -452,7 +456,7 @@ def api_chart_update(
             p_use_no_trade, p_adx_len, p_adx_smooth, p_adx_no_trade_below,
             p_st_atr_len, p_st_factor, p_use_rev_cooldown, p_rev_cooldown_hrs,
             p_use_flip_limit, p_max_flips_per_day, p_use_emergency_sl, p_atr_len, p_atr_mult,
-            p_close_at_end, p_confirm_on_close
+            p_min_hold_bars, p_close_at_end, p_confirm_on_close
         ]))
     """Return Plotly traces/layout for in-page updates (no full page reload)."""
     tf = tf or settings.TF
@@ -575,6 +579,8 @@ def api_chart_update(
             overrides["atr_len"] = int(p_atr_len)
         if p_atr_mult is not None:
             overrides["atr_mult"] = float(p_atr_mult)
+        if p_min_hold_bars is not None:
+            overrides["min_hold_bars"] = int(p_min_hold_bars)
         if p_close_at_end is not None:
             overrides["close_at_end"] = bool(p_close_at_end)
         if p_confirm_on_close is not None:
@@ -686,6 +692,7 @@ def api_save_chart_snapshot(body: dict = Body(...)):
         "use_emergency_sl": True,
         "atr_len": 14,
         "atr_mult": 3.0,
+        "min_hold_bars": 0,
         "close_at_end": False,
     }
     if isinstance(base_params, dict):

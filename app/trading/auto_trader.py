@@ -42,7 +42,7 @@ AUTO_TRADE_ALLOWED_SYMBOLS = _csv_env('AUTO_TRADE_ALLOWED_SYMBOLS', list(getattr
 AUTO_TRADE_ALLOWED_TFS = _csv_env('AUTO_TRADE_ALLOWED_TFS', list(getattr(settings, 'TFS', []) or [getattr(settings, 'TF', '120')]))
 AUTO_TRADE_LOG_PATH = os.getenv('AUTO_TRADE_LOG_PATH', 'auto_trade_log.jsonl')
 AUTO_TRADE_MAX_EVENTS = int(os.getenv('AUTO_TRADE_MAX_EVENTS', '100'))
-AUTO_TRADE_POLL_SEC = float(os.getenv('AUTO_TRADE_POLL_SEC', '5'))
+AUTO_TRADE_POLL_SEC = float(os.getenv('AUTO_TRADE_POLL_SEC', '10'))
 
 AUTO_DEFAULT_LEVERAGE = int(os.getenv('AUTO_DEFAULT_LEVERAGE', str(DEFAULT_LEVERAGE or 1)))
 AUTO_MAX_LEVERAGE = int(os.getenv('AUTO_MAX_LEVERAGE', str(max(1, AUTO_DEFAULT_LEVERAGE))))

@@ -1,0 +1,261 @@
+"""DB layer.
+
+Default: SQLite (DB_PATH).
+If DATABASE_URL is set (e.g. Railway Postgres), uses Postgres.
+
+Schema is shared across both engines (bars + signals).
+
+Important for Postgres:
+- ts is stored in milliseconds (epoch ms), so it must be BIGINT (int8).
+  If tables were created with INTEGER (int4), inserts will fail with "integer out of range".
+  We auto-migrate bars.ts and signals.ts to BIGINT on startup.
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from typing import Iterable, Optional, Tuple
+
+from app.config import settings
+
+
+def _is_postgres() -> bool:
+    url = settings.DATABASE_URL
+    return bool(url) and url.startswith("postgres")
+
+
+def get_conn():
+    if _is_postgres():
+        try:
+            import psycopg2  # type: ignore
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "DATABASE_URL is set but psycopg2 is not installed. Add psycopg2-binary to requirements.txt"
+            ) from e
+        conn = psycopg2.connect(settings.DATABASE_URL)
+        try:
+            # Important for long-lived readers (e.g. auto_trader loop):
+            # without autocommit psycopg2 keeps a transaction open after SELECT,
+            # which can freeze the snapshot and make new bars invisible.
+            conn.autocommit = True
+        except Exception:
+            pass
+        return conn
+
+    # SQLite
+    db_path = settings.DB_PATH
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    return sqlite3.connect(db_path, check_same_thread=False)
+
+
+def _ensure_ts_bigint(conn) -> None:
+    """Railway Postgres: ensure ts columns are BIGINT (ms epoch doesn't fit into INT4)."""
+    if not _is_postgres():
+        return
+
+    try:
+        with conn.cursor() as cur:
+            # Check current type of bars.ts
+            cur.execute(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name='bars' AND column_name='ts'"
+            )
+            row = cur.fetchone()
+            bars_ts_type = row[0] if row else None
+
+        if bars_ts_type == "integer":
+            print("[db] migrating ts columns to BIGINT ...")
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE bars ALTER COLUMN ts TYPE BIGINT USING ts::bigint;")
+                # signals table may or may not exist depending on schema execution
+                cur.execute(
+                    "DO $$ BEGIN "
+                    "IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name='signals') THEN "
+                    "  ALTER TABLE signals ALTER COLUMN ts TYPE BIGINT USING ts::bigint; "
+                    "END IF; "
+                    "END $$;"
+                )
+            conn.commit()
+            print("[db] migration done: ts is BIGINT")
+    except Exception:
+        # If anything fails, rollback so the connection doesn't get stuck in aborted state
+        conn.rollback()
+        raise
+
+
+def init_db():
+    conn = get_conn()
+    schema_path = os.path.join("app", "storage", "schema.sql")
+    with open(schema_path, "r", encoding="utf-8") as f:
+        ddl = f.read()
+
+    if _is_postgres():
+        # Execute each statement separately (simple splitter is OK for our tiny schema)
+        cur = conn.cursor()
+        for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
+            cur.execute(stmt + ";")
+        conn.commit()
+
+        # Auto-fix old schema (ts INTEGER) -> BIGINT
+        _ensure_ts_bigint(conn)
+    else:
+        conn.executescript(ddl)
+        conn.commit()
+
+    return conn
+
+
+def upsert_bars(conn, symbol: str, tf: str, rows: Iterable[Tuple[int, float, float, float, float, float]]):
+    """Upsert bars.
+
+    rows: (ts,o,h,l,c,v) with ts = candle open timestamp in ms.
+    """
+    rows_list = list(rows)
+    if not rows_list:
+        return
+
+    if _is_postgres():
+        from psycopg2.extras import execute_values  # type: ignore
+
+        sql = (
+            "INSERT INTO bars(symbol, tf, ts, o, h, l, c, v) VALUES %s "
+            "ON CONFLICT(symbol, tf, ts) DO UPDATE SET "
+            "o=EXCLUDED.o, h=EXCLUDED.h, l=EXCLUDED.l, c=EXCLUDED.c, v=EXCLUDED.v"
+        )
+        values = [(symbol, tf, *r) for r in rows_list]
+
+        try:
+            with conn.cursor() as cur:
+                execute_values(cur, sql, values, page_size=1000)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return
+
+    # SQLite
+    conn.executemany(
+        """
+        INSERT INTO bars(symbol, tf, ts, o, h, l, c, v)
+        VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(symbol, tf, ts) DO UPDATE SET
+            o=excluded.o,
+            h=excluded.h,
+            l=excluded.l,
+            c=excluded.c,
+            v=excluded.v
+        """,
+        [(symbol, tf, *r) for r in rows_list],
+    )
+    conn.commit()
+
+
+def load_bars(conn, symbol: str, tf: str, limit: int = 500):
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ts,o,h,l,c,v FROM bars WHERE symbol=%s AND tf=%s ORDER BY ts DESC LIMIT %s",
+                (symbol, tf, limit),
+            )
+            rows = cur.fetchall()
+    else:
+        cur = conn.execute(
+            "SELECT ts,o,h,l,c,v FROM bars WHERE symbol=? AND tf=? ORDER BY ts DESC LIMIT ?",
+            (symbol, tf, limit),
+        )
+        rows = cur.fetchall()
+    return list(reversed(rows))
+
+
+def load_bars_before(conn, symbol: str, tf: str, end_ts: int, limit: int = 500):
+    """Load the most recent `limit` bars with ts <= end_ts.
+
+    Returns bars in ascending timestamp order.
+
+    Args:
+        end_ts: inclusive candle open timestamp in ms.
+    """
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ts,o,h,l,c,v FROM bars WHERE symbol=%s AND tf=%s AND ts<=%s ORDER BY ts DESC LIMIT %s",
+                (symbol, tf, end_ts, limit),
+            )
+            rows = cur.fetchall()
+    else:
+        cur = conn.execute(
+            "SELECT ts,o,h,l,c,v FROM bars WHERE symbol=? AND tf=? AND ts<=? ORDER BY ts DESC LIMIT ?",
+            (symbol, tf, end_ts, limit),
+        )
+        rows = cur.fetchall()
+    return list(reversed(rows))
+
+
+def bars_min_max_ts(conn, symbol: str, tf: str) -> Tuple[Optional[int], Optional[int]]:
+    """Return (min_ts, max_ts) for stored bars."""
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(ts), MAX(ts) FROM bars WHERE symbol=%s AND tf=%s",
+                (symbol, tf),
+            )
+            row = cur.fetchone()
+            return (row[0], row[1]) if row else (None, None)
+    else:
+        cur = conn.execute(
+            "SELECT MIN(ts), MAX(ts) FROM bars WHERE symbol=? AND tf=?",
+            (symbol, tf),
+        )
+        row = cur.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+
+
+def save_signal(conn, symbol: str, tf: str, ts: int, signal: str, note: str = ""):
+    if _is_postgres():
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO signals(symbol, tf, ts, signal, note)
+                    VALUES(%s,%s,%s,%s,%s)
+                    ON CONFLICT(symbol, tf, ts) DO UPDATE SET
+                        signal=EXCLUDED.signal,
+                        note=EXCLUDED.note
+                    """,
+                    (symbol, tf, ts, signal, note),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    else:
+        conn.execute(
+            """
+            INSERT INTO signals(symbol, tf, ts, signal, note)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(symbol, tf, ts) DO UPDATE SET
+                signal=excluded.signal,
+                note=excluded.note
+            """,
+            (symbol, tf, ts, signal, note),
+        )
+        conn.commit()
+
+
+def last_signal(conn, symbol: str, tf: str) -> Optional[tuple]:
+    if _is_postgres():
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ts,signal,note FROM signals WHERE symbol=%s AND tf=%s ORDER BY ts DESC LIMIT 1",
+                (symbol, tf),
+            )
+            return cur.fetchone()
+    else:
+        cur = conn.execute(
+            "SELECT ts,signal,note FROM signals WHERE symbol=? AND tf=? ORDER BY ts DESC LIMIT 1",
+            (symbol, tf),
+        )
+        return cur.fetchone()

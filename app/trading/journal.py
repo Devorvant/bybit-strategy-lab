@@ -163,3 +163,115 @@ def make_run_id(symbol: str, tf: str, opt_id: Any, started_at: float | int) -> s
     o = str(opt_id if opt_id is not None else "")
     st = str(int(started_at))
     return f"{s}:{t}:{o}:{st}"
+
+
+
+def log_exchange_snapshot(conn, row: dict) -> None:
+    sql = """
+    INSERT INTO exchange_snapshots (
+        run_id,
+        symbol,
+        tf,
+        bar_ts,
+        source,
+        side,
+        size,
+        avg_price,
+        mark_price,
+        unrealised_pnl,
+        leverage,
+        liq_price,
+        take_profit,
+        stop_loss,
+        has_position,
+        wallet_equity,
+        wallet_balance,
+        available_balance,
+        payload
+    )
+    VALUES (
+        %(run_id)s,
+        %(symbol)s,
+        %(tf)s,
+        %(bar_ts)s,
+        %(source)s,
+        %(side)s,
+        %(size)s,
+        %(avg_price)s,
+        %(mark_price)s,
+        %(unrealised_pnl)s,
+        %(leverage)s,
+        %(liq_price)s,
+        %(take_profit)s,
+        %(stop_loss)s,
+        %(has_position)s,
+        %(wallet_equity)s,
+        %(wallet_balance)s,
+        %(available_balance)s,
+        %(payload)s::jsonb
+    )
+    """
+
+    params = {
+        "run_id": row.get("run_id"),
+        "symbol": row.get("symbol"),
+        "tf": row.get("tf"),
+        "bar_ts": row.get("bar_ts"),
+        "source": row.get("source"),
+        "side": row.get("side"),
+        "size": row.get("size"),
+        "avg_price": row.get("avg_price"),
+        "mark_price": row.get("mark_price"),
+        "unrealised_pnl": row.get("unrealised_pnl"),
+        "leverage": row.get("leverage"),
+        "liq_price": row.get("liq_price"),
+        "take_profit": row.get("take_profit"),
+        "stop_loss": row.get("stop_loss"),
+        "has_position": row.get("has_position"),
+        "wallet_equity": row.get("wallet_equity"),
+        "wallet_balance": row.get("wallet_balance"),
+        "available_balance": row.get("available_balance"),
+        "payload": _payload_dumps(row.get("payload")),
+    }
+
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def snapshot_from_exchange(
+    symbol: str,
+    position_snapshot: dict | None,
+    account_snapshot: dict | None,
+    *,
+    source: str,
+    run_id: str | None = None,
+    tf: str | None = None,
+    bar_ts: int | None = None,
+) -> dict:
+    p = (position_snapshot or {}).get("position") or {}
+    a = account_snapshot or {}
+
+    return {
+        "run_id": run_id,
+        "symbol": symbol,
+        "tf": tf,
+        "bar_ts": bar_ts,
+        "source": source,
+        "side": p.get("side"),
+        "size": p.get("size"),
+        "avg_price": p.get("avgPrice"),
+        "mark_price": p.get("markPrice"),
+        "unrealised_pnl": p.get("unrealisedPnl"),
+        "leverage": p.get("leverage"),
+        "liq_price": p.get("liqPrice"),
+        "take_profit": p.get("takeProfit"),
+        "stop_loss": p.get("stopLoss"),
+        "has_position": (position_snapshot or {}).get("has_position"),
+        "wallet_equity": a.get("equity"),
+        "wallet_balance": a.get("walletBalance"),
+        "available_balance": a.get("availableBalance"),
+        "payload": {
+            "position_snapshot": position_snapshot,
+            "account_snapshot": account_snapshot,
+        },
+    }

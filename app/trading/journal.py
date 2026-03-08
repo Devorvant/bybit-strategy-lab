@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import json
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(v) for v in value]
+    return str(value)
+
+
+def _payload_dumps(value: Any) -> str:
+    return json.dumps(_jsonable(value), ensure_ascii=False)
+
+
+def log_strategy_decision(conn, row: dict) -> None:
+    sql = """
+    INSERT INTO strategy_decisions (
+        run_id,
+        symbol,
+        tf,
+        bar_ts,
+        opt_id,
+        strategy_name,
+        signal,
+        action,
+        reason,
+        signal_note,
+        exchange_side,
+        exchange_size,
+        cooldown_active,
+        cooldown_until,
+        blocked,
+        blocked_reason,
+        auto_enabled,
+        execute_requested,
+        executed,
+        payload
+    )
+    VALUES (
+        %(run_id)s,
+        %(symbol)s,
+        %(tf)s,
+        %(bar_ts)s,
+        %(opt_id)s,
+        %(strategy_name)s,
+        %(signal)s,
+        %(action)s,
+        %(reason)s,
+        %(signal_note)s,
+        %(exchange_side)s,
+        %(exchange_size)s,
+        %(cooldown_active)s,
+        %(cooldown_until)s,
+        %(blocked)s,
+        %(blocked_reason)s,
+        %(auto_enabled)s,
+        %(execute_requested)s,
+        %(executed)s,
+        %(payload)s::jsonb
+    )
+    """
+
+    payload = dict(row or {})
+    params = {
+        "run_id": row.get("run_id"),
+        "symbol": row.get("symbol"),
+        "tf": row.get("tf"),
+        "bar_ts": row.get("bar_ts"),
+        "opt_id": row.get("opt_id"),
+        "strategy_name": row.get("strategy_name"),
+        "signal": row.get("signal"),
+        "action": row.get("action"),
+        "reason": row.get("reason"),
+        "signal_note": row.get("signal_note"),
+        "exchange_side": row.get("exchange_side"),
+        "exchange_size": row.get("exchange_size"),
+        "cooldown_active": row.get("cooldown_active"),
+        "cooldown_until": row.get("cooldown_until"),
+        "blocked": row.get("blocked"),
+        "blocked_reason": row.get("blocked_reason"),
+        "auto_enabled": row.get("auto_enabled"),
+        "execute_requested": row.get("execute_requested"),
+        "executed": row.get("executed"),
+        "payload": _payload_dumps(payload),
+    }
+
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def log_execution_event(conn, row: dict) -> None:
+    sql = """
+    INSERT INTO execution_events (
+        run_id,
+        symbol,
+        tf,
+        bar_ts,
+        event_type,
+        requested_action,
+        side,
+        qty,
+        price,
+        reduce_only,
+        ok,
+        error,
+        response
+    )
+    VALUES (
+        %(run_id)s,
+        %(symbol)s,
+        %(tf)s,
+        %(bar_ts)s,
+        %(event_type)s,
+        %(requested_action)s,
+        %(side)s,
+        %(qty)s,
+        %(price)s,
+        %(reduce_only)s,
+        %(ok)s,
+        %(error)s,
+        %(response)s::jsonb
+    )
+    """
+
+    response = row.get("response")
+    params = {
+        "run_id": row.get("run_id"),
+        "symbol": row.get("symbol"),
+        "tf": row.get("tf"),
+        "bar_ts": row.get("bar_ts"),
+        "event_type": row.get("event_type"),
+        "requested_action": row.get("requested_action"),
+        "side": row.get("side"),
+        "qty": row.get("qty"),
+        "price": row.get("price"),
+        "reduce_only": row.get("reduce_only"),
+        "ok": row.get("ok"),
+        "error": row.get("error"),
+        "response": _payload_dumps(response),
+    }
+
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def make_run_id(symbol: str, tf: str, opt_id: Any, started_at: float | int) -> str:
+    s = str(symbol or "").upper()
+    t = str(tf or "")
+    o = str(opt_id if opt_id is not None else "")
+    st = str(int(started_at))
+    return f"{s}:{t}:{o}:{st}"

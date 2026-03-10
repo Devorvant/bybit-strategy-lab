@@ -14,6 +14,16 @@ def _expected_side(action: str | None) -> str | None:
     return None
 
 
+def _match_confidence(event: dict, snapshot: dict | None) -> str:
+    if event.get("order_link_id"):
+        return "high"
+    if event.get("order_id"):
+        return "high"
+    if snapshot is not None:
+        return "medium"
+    return "low"
+
+
 def classify_execution(event: dict, snapshot: dict | None) -> dict:
     action = str(event.get("requested_action") or "").upper()
     event_type = str(event.get("event_type") or "")
@@ -23,12 +33,14 @@ def classify_execution(event: dict, snapshot: dict | None) -> dict:
         return {
             "status": "error",
             "reason": event.get("error") or "execution failed",
+            "match_confidence": _match_confidence(event, snapshot),
         }
 
     if snapshot is None:
         return {
             "status": "unknown",
-            "reason": "no snapshot found after execution",
+            "reason": "no near snapshot within 60s",
+            "match_confidence": _match_confidence(event, snapshot),
         }
 
     expected = _expected_side(action)
@@ -41,10 +53,12 @@ def classify_execution(event: dict, snapshot: dict | None) -> dict:
             return {
                 "status": "confirmed",
                 "reason": "position closed",
+                "match_confidence": _match_confidence(event, snapshot),
             }
         return {
             "status": "mismatch",
             "reason": f"expected flat, got side={snap_side} size={snap_size}",
+            "match_confidence": _match_confidence(event, snapshot),
         }
 
     if expected == "Buy":
@@ -52,15 +66,18 @@ def classify_execution(event: dict, snapshot: dict | None) -> dict:
             return {
                 "status": "confirmed",
                 "reason": "long position confirmed",
+                "match_confidence": _match_confidence(event, snapshot),
             }
         if float(snap_size or 0) == 0:
             return {
                 "status": "no_effect",
                 "reason": "long requested but position still flat",
+                "match_confidence": _match_confidence(event, snapshot),
             }
         return {
             "status": "mismatch",
             "reason": f"expected long, got side={snap_side} size={snap_size}",
+            "match_confidence": _match_confidence(event, snapshot),
         }
 
     if expected == "Sell":
@@ -68,24 +85,34 @@ def classify_execution(event: dict, snapshot: dict | None) -> dict:
             return {
                 "status": "confirmed",
                 "reason": "short position confirmed",
+                "match_confidence": _match_confidence(event, snapshot),
             }
         if float(snap_size or 0) == 0:
             return {
                 "status": "no_effect",
                 "reason": "short requested but position still flat",
+                "match_confidence": _match_confidence(event, snapshot),
             }
         return {
             "status": "mismatch",
             "reason": f"expected short, got side={snap_side} size={snap_size}",
+            "match_confidence": _match_confidence(event, snapshot),
         }
 
     return {
         "status": "unknown",
         "reason": f"unsupported action={action} event_type={event_type}",
+        "match_confidence": _match_confidence(event, snapshot),
     }
 
 
-def find_next_snapshot(conn, symbol: str, event_ts, source: str | None = None) -> dict | None:
+def find_next_snapshot(
+    conn,
+    symbol: str,
+    event_ts,
+    source: str | None = None,
+    within_seconds: int = 60,
+) -> dict | None:
     sql = """
     SELECT
         id, ts, symbol, source, side, size, avg_price, mark_price,
@@ -94,16 +121,21 @@ def find_next_snapshot(conn, symbol: str, event_ts, source: str | None = None) -
     FROM exchange_snapshots
     WHERE symbol = %(symbol)s
       AND ts >= %(event_ts)s
+      AND ts <= (%(event_ts)s + (%(within_seconds)s || ' seconds')::interval)
       AND (%(source)s IS NULL OR source = %(source)s)
     ORDER BY ts ASC
     LIMIT 1
     """
     with conn.cursor() as cur:
-        cur.execute(sql, {
-            "symbol": symbol,
-            "event_ts": event_ts,
-            "source": source,
-        })
+        cur.execute(
+            sql,
+            {
+                "symbol": symbol,
+                "event_ts": event_ts,
+                "within_seconds": within_seconds,
+                "source": source,
+            },
+        )
         row = cur.fetchone()
         if row is None:
             return None
@@ -115,9 +147,23 @@ def find_next_snapshot(conn, symbol: str, event_ts, source: str | None = None) -
 def load_recent_execution_events(conn, limit: int = 100) -> list[dict]:
     sql = """
     SELECT
-        id, ts, run_id, symbol, tf, bar_ts,
-        event_type, requested_action, side, qty, price,
-        reduce_only, ok, error, response
+        id,
+        ts,
+        run_id,
+        symbol,
+        tf,
+        bar_ts,
+        event_type,
+        requested_action,
+        side,
+        qty,
+        price,
+        reduce_only,
+        ok,
+        error,
+        response,
+        order_id,
+        order_link_id
     FROM execution_events
     ORDER BY id DESC
     LIMIT %(limit)s
@@ -129,7 +175,7 @@ def load_recent_execution_events(conn, limit: int = 100) -> list[dict]:
     return [dict(zip(cols, row)) for row in rows]
 
 
-def analyze_recent_events(conn, limit: int = 100) -> list[dict]:
+def analyze_recent_events(conn, limit: int = 100, within_seconds: int = 60) -> list[dict]:
     events = load_recent_execution_events(conn, limit=limit)
     out: list[dict] = []
 
@@ -143,27 +189,38 @@ def analyze_recent_events(conn, limit: int = 100) -> list[dict]:
         else:
             source = None
 
-        snap = find_next_snapshot(conn, e["symbol"], e["ts"], source=source)
+        snap = find_next_snapshot(
+            conn,
+            e["symbol"],
+            e["ts"],
+            source=source,
+            within_seconds=within_seconds,
+        )
         verdict = classify_execution(e, snap)
 
-        out.append({
-            "event_id": e.get("id"),
-            "event_ts": e.get("ts"),
-            "symbol": e.get("symbol"),
-            "event_type": e.get("event_type"),
-            "requested_action": e.get("requested_action"),
-            "ok": e.get("ok"),
-            "error": e.get("error"),
-            "snapshot_id": snap.get("id") if snap else None,
-            "snapshot_ts": snap.get("ts") if snap else None,
-            "snapshot_source": snap.get("source") if snap else None,
-            "snapshot_side": snap.get("side") if snap else None,
-            "snapshot_size": snap.get("size") if snap else None,
-            "snapshot_avg_price": snap.get("avg_price") if snap else None,
-            "snapshot_tp": snap.get("take_profit") if snap else None,
-            "snapshot_sl": snap.get("stop_loss") if snap else None,
-            "status": verdict.get("status"),
-            "reason": verdict.get("reason"),
-        })
+        out.append(
+            {
+                "event_id": e.get("id"),
+                "event_ts": e.get("ts"),
+                "symbol": e.get("symbol"),
+                "event_type": e.get("event_type"),
+                "requested_action": e.get("requested_action"),
+                "ok": e.get("ok"),
+                "error": e.get("error"),
+                "order_link_id": e.get("order_link_id"),
+                "order_id": e.get("order_id"),
+                "snapshot_id": snap.get("id") if snap else None,
+                "snapshot_ts": snap.get("ts") if snap else None,
+                "snapshot_source": snap.get("source") if snap else None,
+                "snapshot_side": snap.get("side") if snap else None,
+                "snapshot_size": snap.get("size") if snap else None,
+                "snapshot_avg_price": snap.get("avg_price") if snap else None,
+                "snapshot_tp": snap.get("take_profit") if snap else None,
+                "snapshot_sl": snap.get("stop_loss") if snap else None,
+                "status": verdict.get("status"),
+                "reason": verdict.get("reason"),
+                "match_confidence": verdict.get("match_confidence"),
+            }
+        )
 
     return out

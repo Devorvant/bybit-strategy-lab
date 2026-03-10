@@ -11,6 +11,8 @@ from .auto_trader import get_auto_config, get_auto_loop_status, get_last_auto_ev
 from .strategy_registry import ensure_opt_auto_columns, get_opt_strategy_entry, set_opt_auto_status, list_risk_profiles, get_risk_profile, set_opt_risk_profile
 from app.storage.db import get_conn
 
+from app.trading.analyzer import analyze_recent_events, analyze_exchange_side_closes
+
 try:
     from .analyzer import analyze_recent_events
 except Exception:
@@ -356,4 +358,19 @@ def trade_analyze_mismatch(limit: int = 100, _auth=Depends(require_trade_token))
         'ok': True,
         'count': len(bad),
         'rows': bad,
+    }
+
+
+@router.get('/analyze/exchange-closes')
+def trade_analyze_exchange_closes(
+    symbol: str | None = None,
+    limit: int = 200,
+    _auth=Depends(require_trade_token),
+):
+    conn = get_conn()
+    rows = analyze_exchange_side_closes(conn, symbol=symbol, limit=limit)
+    return {
+        "ok": True,
+        "count": len(rows),
+        "rows": rows,
     }

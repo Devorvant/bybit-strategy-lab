@@ -41,6 +41,7 @@ def execute_action(
     sl_percent: float | None = None,
     tp_percent: float | None = None,
     ensure_isolated: bool = True,
+    order_link_id: str | None = None,
 ) -> Dict[str, Any]:
     symbol = bybit.clean_symbol(symbol)
     action = (action or '').upper().strip()
@@ -62,7 +63,7 @@ def execute_action(
 
         pos = bybit.get_position_size(symbol)
         if action == 'CLOSE':
-            resp = bybit.close_full_position(symbol)
+            resp = bybit.close_full_position(symbol, order_link_id=order_link_id)
             return ExecutionResult(ok=True, action=action, symbol=symbol, position_before=pos, response=resp, leverage=lev).to_dict()
 
         # Flip if needed
@@ -81,7 +82,7 @@ def execute_action(
         rules = bybit.get_qty_rules(symbol)
         qty = calc_qty_from_position_usd(pos_usd, price, rules)
         side = 'Buy' if action == 'LONG' else 'Sell'
-        resp = bybit.place_market(symbol, side, qty, reduce_only=False)
+        resp = bybit.place_market(symbol, side, qty, reduce_only=False, order_link_id=order_link_id)
 
         tp_price = None
         sl_price = None

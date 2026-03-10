@@ -37,9 +37,19 @@ def _client() -> BybitClient:
     return BybitClient()
 
 
+def _extract_order_ids(resp: Dict[str, Any] | None) -> tuple[str | None, str | None]:
+    try:
+        result = ((resp or {}).get('response') or {}).get('result') or {}
+        order_id = result.get('orderId')
+        order_link_id = result.get('orderLinkId')
+        return order_id, order_link_id
+    except Exception:
+        return None, None
 
 
-
+def _make_manual_order_link_id(action: str) -> str:
+    a = str(action or '').strip().lower() or 'unknown'
+    return f"manual-{a}-{int(time.time() * 1000)}"
 
 @router.get('/strategy3/auto-status')
 def trade_strategy3_auto_status(opt_id: int = Query(..., ge=1)):
@@ -227,6 +237,8 @@ def trade_execute(
     sl_percent = payload.get('sl_percent')
     tp_percent = payload.get('tp_percent')
 
+    order_link_id = _make_manual_order_link_id(action)
+
     _last_cmd = {
         'ts': time.time(),
         'symbol': symbol,
@@ -235,6 +247,7 @@ def trade_execute(
         'leverage': leverage,
         'sl_percent': sl_percent,
         'tp_percent': tp_percent,
+        'order_link_id': order_link_id,
     }
 
     conn = None
@@ -253,6 +266,8 @@ def trade_execute(
             'reduce_only': (action == 'CLOSE'),
             'ok': True,
             'error': None,
+            'order_id': None,
+            'order_link_id': order_link_id,
             'response': {
                 'source': 'manual_trade',
                 'position_usd': position_usd,
@@ -274,10 +289,12 @@ def trade_execute(
         leverage=leverage,
         sl_percent=sl_percent,
         tp_percent=tp_percent,
+        order_link_id=order_link_id,
     )
 
     try:
         conn = get_conn()
+        order_id, result_order_link_id = _extract_order_ids(_last_result)
         log_execution_event(conn, {
             'run_id': None,
             'symbol': symbol,
@@ -291,6 +308,8 @@ def trade_execute(
             'reduce_only': (action == 'CLOSE'),
             'ok': bool((_last_result or {}).get('ok', False)),
             'error': (_last_result or {}).get('error'),
+            'order_id': order_id,
+            'order_link_id': result_order_link_id or order_link_id,
             'response': _last_result,
         })
         try:

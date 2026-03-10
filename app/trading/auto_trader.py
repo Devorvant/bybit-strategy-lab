@@ -141,6 +141,19 @@ def _journal_strategy(payload: Dict[str, Any], symbol: str, tf: str, opt_id: Any
         pass
 
 
+def _extract_order_ids(resp: Dict[str, Any] | None) -> tuple[str | None, str | None]:
+    try:
+        result = ((resp or {}).get('response') or {}).get('result') or {}
+        return result.get('orderId'), result.get('orderLinkId')
+    except Exception:
+        return None, None
+
+
+def _make_auto_order_link_id(action: str, symbol: str, tf: str, bar_ts: int | None) -> str:
+    a = str(action or '').strip().lower() or 'unknown'
+    return f"auto-{symbol.lower()}-{tf}-{a}-{int(bar_ts or time.time() * 1000)}"
+
+
 def _journal_execution(symbol: str, tf: str, opt_id: Any, **row: Any) -> None:
     try:
         conn = _get_conn()
@@ -605,6 +618,7 @@ def process_symbol(
 
     if execute and not blocked and action in {'OPEN_LONG', 'OPEN_SHORT', 'CLOSE_LONG', 'CLOSE_SHORT'}:
         action_for_executor = 'LONG' if action == 'OPEN_LONG' else 'SHORT' if action == 'OPEN_SHORT' else 'CLOSE'
+        order_link_id = _make_auto_order_link_id(action, symbol, tf, bar_ts)
         _journal_execution(
             symbol,
             tf,
@@ -618,6 +632,8 @@ def process_symbol(
             reduce_only=action in {'CLOSE_LONG', 'CLOSE_SHORT'},
             ok=True,
             error=None,
+            order_id=None,
+            order_link_id=order_link_id,
             response={'reason': reason, 'trade_params': trade_params},
         )
         execution_result = execute_action(
@@ -628,8 +644,10 @@ def process_symbol(
             leverage=trade_params.get('leverage'),
             sl_percent=trade_params.get('sl_percent'),
             tp_percent=trade_params.get('tp_percent'),
+            order_link_id=order_link_id,
         )
         executed = bool(execution_result.get('ok'))
+        order_id, result_order_link_id = _extract_order_ids(execution_result)
         _journal_execution(
             symbol,
             tf,
@@ -643,6 +661,8 @@ def process_symbol(
             reduce_only=action in {'CLOSE_LONG', 'CLOSE_SHORT'},
             ok=executed,
             error=None if executed else execution_result.get('error') or execution_result.get('note'),
+            order_id=order_id,
+            order_link_id=result_order_link_id or order_link_id,
             response=execution_result,
         )
         try:

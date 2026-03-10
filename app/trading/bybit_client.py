@@ -176,27 +176,30 @@ class BybitClient:
             payload['slTriggerBy'] = 'MarkPrice'
         return self.client.set_trading_stop(**payload)
 
-    def place_market(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> Dict[str, Any]:
+    def place_market(self, symbol: str, side: str, qty: float, reduce_only: bool = False, order_link_id: str | None = None) -> Dict[str, Any]:
         self.ensure_ready()
         symbol = self.clean_symbol(symbol)
-        return self.client.place_order(
-            category=CATEGORY,
-            symbol=symbol,
-            side=side,
-            orderType='Market',
-            qty=fmt_number(qty),
-            reduceOnly=reduce_only,
-            timeInForce='GTC',
-        )
+        payload = {
+            'category': CATEGORY,
+            'symbol': symbol,
+            'side': side,
+            'orderType': 'Market',
+            'qty': fmt_number(qty),
+            'reduceOnly': reduce_only,
+            'timeInForce': 'GTC',
+        }
+        if order_link_id:
+            payload['orderLinkId'] = order_link_id
+        return self.client.place_order(**payload)
 
-    def close_full_position(self, symbol: str) -> Dict[str, Any]:
+    def close_full_position(self, symbol: str, order_link_id: str | None = None) -> Dict[str, Any]:
         pos = self.get_position_size(symbol)
         if pos == 0:
             return {'ok': True, 'note': 'no position to close'}
         qty = abs(pos)
         if pos > 0:
-            return self.place_market(symbol, 'Sell', qty, reduce_only=True)
-        return self.place_market(symbol, 'Buy', qty, reduce_only=True)
+            return self.place_market(symbol, 'Sell', qty, reduce_only=True, order_link_id=order_link_id)
+        return self.place_market(symbol, 'Buy', qty, reduce_only=True, order_link_id=order_link_id)
 
     def get_position_snapshot(self, symbol: str) -> Dict[str, Any]:
         symbol = self.clean_symbol(symbol)

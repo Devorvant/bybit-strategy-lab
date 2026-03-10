@@ -117,6 +117,8 @@ def log_execution_event(conn, row: dict) -> None:
         reduce_only,
         ok,
         error,
+        order_id,
+        order_link_id,
         response
     )
     VALUES (
@@ -132,6 +134,8 @@ def log_execution_event(conn, row: dict) -> None:
         %(reduce_only)s,
         %(ok)s,
         %(error)s,
+        %(order_id)s,
+        %(order_link_id)s,
         %(response)s::jsonb
     )
     """
@@ -150,6 +154,8 @@ def log_execution_event(conn, row: dict) -> None:
         "reduce_only": row.get("reduce_only"),
         "ok": row.get("ok"),
         "error": row.get("error"),
+        "order_id": row.get("order_id"),
+        "order_link_id": row.get("order_link_id"),
         "response": _payload_dumps(response),
     }
 

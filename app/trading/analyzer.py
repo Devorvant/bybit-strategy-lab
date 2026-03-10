@@ -224,3 +224,168 @@ def analyze_recent_events(conn, limit: int = 100, within_seconds: int = 60) -> l
         )
 
     return out
+
+
+def load_recent_snapshots(conn, symbol: str | None = None, limit: int = 200) -> list[dict]:
+    sql = """
+    SELECT
+        id,
+        ts,
+        run_id,
+        symbol,
+        tf,
+        bar_ts,
+        source,
+        side,
+        size,
+        avg_price,
+        mark_price,
+        unrealised_pnl,
+        leverage,
+        liq_price,
+        take_profit,
+        stop_loss,
+        has_position,
+        wallet_equity,
+        wallet_balance,
+        available_balance,
+        payload
+    FROM exchange_snapshots
+    WHERE (%(symbol)s IS NULL OR symbol = %(symbol)s)
+    ORDER BY ts DESC
+    LIMIT %(limit)s
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"symbol": symbol, "limit": limit})
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def _is_close_event(e: dict) -> bool:
+    action = str(e.get("requested_action") or "").upper()
+    event_type = str(e.get("event_type") or "")
+    if not bool(e.get("ok")):
+        return False
+    if action in ("CLOSE", "CLOSE_LONG", "CLOSE_SHORT"):
+        return True
+    if event_type in ("manual_execute_result", "execute_result") and action.startswith("CLOSE"):
+        return True
+    return False
+
+
+def load_execution_events_between(conn, symbol: str, ts_from, ts_to) -> list[dict]:
+    sql = """
+    SELECT
+        id,
+        ts,
+        run_id,
+        symbol,
+        tf,
+        bar_ts,
+        event_type,
+        requested_action,
+        side,
+        qty,
+        price,
+        reduce_only,
+        ok,
+        error,
+        response,
+        order_id,
+        order_link_id
+    FROM execution_events
+    WHERE symbol = %(symbol)s
+      AND ts >= %(ts_from)s
+      AND ts <= %(ts_to)s
+    ORDER BY ts ASC
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"symbol": symbol, "ts_from": ts_from, "ts_to": ts_to})
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+def detect_exchange_close(prev_snapshot: dict | None, next_snapshot: dict | None, events_between: list[dict]) -> dict | None:
+    if not prev_snapshot or not next_snapshot:
+        return None
+
+    prev_size = float(prev_snapshot.get("size") or 0)
+    next_size = float(next_snapshot.get("size") or 0)
+
+    prev_has = bool(prev_snapshot.get("has_position")) and prev_size > 0
+    next_has = bool(next_snapshot.get("has_position")) and next_size > 0
+
+    # Было открыто -> стало пусто
+    if not prev_has:
+        return None
+    if next_has or next_size > 0:
+        return None
+
+    # Если между snapshot было наше закрытие — это не биржевое закрытие
+    close_events = [e for e in events_between if _is_close_event(e)]
+    if close_events:
+        return None
+
+    tp = prev_snapshot.get("take_profit")
+    sl = prev_snapshot.get("stop_loss")
+
+    if tp is not None or sl is not None:
+        return {
+            "status": "exchange_tp_sl_close",
+            "reason": "position disappeared without our close; TP/SL existed on previous snapshot",
+        }
+
+    return {
+        "status": "exchange_external_close",
+        "reason": "position disappeared without our close and without TP/SL on previous snapshot",
+    }
+
+
+def analyze_exchange_side_closes(conn, symbol: str | None = None, limit: int = 200) -> list[dict]:
+    snaps = load_recent_snapshots(conn, symbol=symbol, limit=limit)
+
+    # Для анализа удобнее идти по времени вперёд
+    snaps = list(reversed(snaps))
+
+    out: list[dict] = []
+
+    for i in range(len(snaps) - 1):
+        prev_s = snaps[i]
+        next_s = snaps[i + 1]
+
+        if prev_s.get("symbol") != next_s.get("symbol"):
+            continue
+
+        events_between = load_execution_events_between(
+            conn,
+            symbol=prev_s["symbol"],
+            ts_from=prev_s["ts"],
+            ts_to=next_s["ts"],
+        )
+
+        verdict = detect_exchange_close(prev_s, next_s, events_between)
+        if verdict is None:
+            continue
+
+        out.append({
+            "symbol": prev_s["symbol"],
+            "prev_snapshot_id": prev_s.get("id"),
+            "prev_ts": prev_s.get("ts"),
+            "prev_side": prev_s.get("side"),
+            "prev_size": prev_s.get("size"),
+            "prev_avg_price": prev_s.get("avg_price"),
+            "prev_tp": prev_s.get("take_profit"),
+            "prev_sl": prev_s.get("stop_loss"),
+            "next_snapshot_id": next_s.get("id"),
+            "next_ts": next_s.get("ts"),
+            "next_side": next_s.get("side"),
+            "next_size": next_s.get("size"),
+            "status": verdict["status"],
+            "reason": verdict["reason"],
+            "events_between_count": len(events_between),
+        })
+
+    # Последние сверху
+    return list(reversed(out))

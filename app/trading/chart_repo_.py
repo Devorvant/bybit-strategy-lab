@@ -92,7 +92,7 @@ class TradeChartRepo:
                     SELECT id, ts, run_id, symbol, tf, bar_ts, event_type, requested_action, side,
                            qty, price, reduce_only, ok, error, response, order_id, order_link_id
                     FROM execution_events
-                    WHERE symbol=? AND (tf=? OR tf IS NULL)
+                    WHERE symbol=? AND (tf=? OR tf IS NULL OR tf='')
                     ORDER BY id DESC
                     LIMIT ?
                     """,
@@ -120,7 +120,7 @@ class TradeChartRepo:
                         SELECT id, ts, run_id, symbol, tf, bar_ts, event_type, requested_action, side,
                                qty, price, reduce_only, ok, error, response, order_id, order_link_id
                         FROM execution_events
-                        WHERE symbol=%s AND (tf=%s OR tf IS NULL)
+                        WHERE symbol=%s AND (tf=%s OR tf IS NULL OR tf='')
                         ORDER BY id DESC
                         LIMIT %s
                         """,
@@ -154,7 +154,7 @@ class TradeChartRepo:
                            mark_price, unrealised_pnl, leverage, liq_price, take_profit, stop_loss,
                            has_position, wallet_equity, wallet_balance, available_balance, payload
                     FROM exchange_snapshots
-                    WHERE symbol=? AND (tf=? OR tf IS NULL)
+                    WHERE symbol=? AND (tf=? OR tf IS NULL OR tf='')
                     ORDER BY id DESC
                     LIMIT ?
                     """,
@@ -184,7 +184,7 @@ class TradeChartRepo:
                                mark_price, unrealised_pnl, leverage, liq_price, take_profit, stop_loss,
                                has_position, wallet_equity, wallet_balance, available_balance, payload
                         FROM exchange_snapshots
-                        WHERE symbol=%s AND (tf=%s OR tf IS NULL)
+                        WHERE symbol=%s AND (tf=%s OR tf IS NULL OR tf='')
                         ORDER BY id DESC
                         LIMIT %s
                         """,

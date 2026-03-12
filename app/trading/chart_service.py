@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from app.reporting.chart import _build_fig_and_bt  # re-use current chart/backtest logic
@@ -436,7 +437,6 @@ class TradeChartService:
         return out
 
 
-
 def build_trade_chart_payload(**kwargs) -> dict[str, Any]:
     return TradeChartService().build_trade_chart_payload(**kwargs)
 
@@ -501,8 +501,10 @@ def _derive_snapshot_events(rows: list[dict[str, Any]], bars: list[tuple[int, fl
         if ts is None:
             prev = row
             continue
-        cur_has = bool(row.get("has_position")) and float(row.get("size") or 0) > 0
-        prev_has = bool(prev.get("has_position")) and float(prev.get("size") or 0) > 0 if prev else False
+
+        cur_has = _bool_from_mixed(row.get("has_position")) and float(row.get("size") or 0) > 0
+        prev_has = _bool_from_mixed(prev.get("has_position")) and float(prev.get("size") or 0) > 0 if prev else False
+
         if prev is not None and prev_has and not cur_has:
             note = "position closed on exchange outside expected strategy flow"
             kind = "exchange_tp_sl_close" if prev.get("take_profit") or prev.get("stop_loss") else "exchange_external_close"
@@ -624,6 +626,17 @@ def _normalize_side(value: Any) -> str | None:
     return None
 
 
+def _bool_from_mixed(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    return s in {"1", "true", "t", "yes", "y", "on"}
+
+
 def _max_drawdown_pct(eq: list[float]) -> float:
     if not eq:
         return 0.0
@@ -681,16 +694,32 @@ def _int_or_none(v: Any) -> int | None:
 def _millis_from_mixed(v: Any) -> int | None:
     if v is None:
         return None
+
     if isinstance(v, (int, float)):
         iv = int(v)
         return iv if iv > 10_000_000_000 else iv * 1000
+
     if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+
         try:
-            fv = float(v)
+            fv = float(s)
             iv = int(fv)
             return iv if iv > 10_000_000_000 else iv * 1000
         except Exception:
+            pass
+
+        try:
+            s2 = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s2)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except Exception:
             return None
+
     return None
 
 

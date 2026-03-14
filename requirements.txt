@@ -13,3 +13,4 @@ psycopg2-binary==2.9.9
 
 optuna==3.6.1
 pybit==5.8.0
+jinja2>=3.1

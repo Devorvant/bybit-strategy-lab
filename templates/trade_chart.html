@@ -78,6 +78,8 @@
   </div>
 
   <script>
+    let tradeChartDataCache = null;
+
     function getParam(name, fallback='') {
       const u = new URL(window.location.href);
       return u.searchParams.get(name) || fallback;
@@ -172,6 +174,8 @@
     }
 
     function renderPriceChart(data) {
+      tradeChartDataCache = data;
+
       const bars = data?.chart?.bars || [];
       const strategyEvents = data?.strategy?.events || [];
 
@@ -214,8 +218,16 @@
         paper_bgcolor: '#0a1830',
         plot_bgcolor: '#0a1830',
         font: { color: '#e6eef8' },
-        xaxis: { rangeslider: { visible: false } },
-        yaxis: { title: 'Price' },
+        xaxis: {
+          rangeslider: { visible: false },
+          showgrid: true,
+          gridcolor: '#1d3557'
+        },
+        yaxis: {
+          title: 'Price',
+          showgrid: true,
+          gridcolor: '#1d3557'
+        },
         legend: { orientation: 'h' },
         margin: { t: 20, r: 20, b: 40, l: 50 }
       };
@@ -238,13 +250,41 @@
         paper_bgcolor: '#0a1830',
         plot_bgcolor: '#0a1830',
         font: { color: '#e6eef8' },
-        xaxis: { rangeslider: { visible: false } },
-        yaxis: { title: 'Equity' },
+        xaxis: {
+          rangeslider: { visible: false },
+          showgrid: true,
+          gridcolor: '#1d3557'
+        },
+        yaxis: {
+          title: 'Equity',
+          showgrid: true,
+          gridcolor: '#1d3557'
+        },
         legend: { orientation: 'h' },
         margin: { t: 20, r: 20, b: 40, l: 50 }
       };
 
       Plotly.newPlot('equityChartWrap', traces, layout, { responsive: true });
+    }
+
+    function focusTradeOnChart(entryTs, exitTs) {
+      const chartEl = document.getElementById('priceChartWrap');
+      if (!chartEl) return;
+
+      const startTs = entryTs || exitTs;
+      const endTs = exitTs || entryTs;
+      if (!startTs && !endTs) return;
+
+      const padMs = 6 * 60 * 60 * 1000;
+      const x0 = new Date((startTs || endTs) - padMs);
+      const x1 = new Date((endTs || startTs) + padMs);
+
+      Plotly.relayout(chartEl, {
+        'xaxis.range[0]': x0,
+        'xaxis.range[1]': x1
+      });
+
+      chartEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
     function renderStrategyTrades(data) {
@@ -256,6 +296,9 @@
       for (const r of rows) {
         const tr = document.createElement('tr');
         const tradeType = r.exit_ts ? 'ЗАКРЫТА' : 'ОТКРЫТА';
+
+        tr.style.cursor = 'pointer';
+        tr.onclick = () => focusTradeOnChart(r.entry_ts, r.exit_ts);
 
         tr.innerHTML = `
           <td>${r.trade_id ?? ''}</td>
@@ -269,6 +312,14 @@
           <td>${fmtNum2(r.pnl_usd)}</td>
           <td>${fmtNum2(r.cum_pnl_usd)}</td>
         `;
+
+        tr.onmouseenter = () => {
+          tr.style.background = '#102446';
+        };
+        tr.onmouseleave = () => {
+          tr.style.background = '';
+        };
+
         tbody.appendChild(tr);
       }
     }

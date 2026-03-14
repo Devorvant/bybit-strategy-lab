@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app.storage.db import get_conn
-from .analyzer import build_chart_events
 from .chart_service import (
     build_trade_chart_payload,
+    build_trade_events_payload,
     build_trade_status_payload,
 )
-
 
 router = APIRouter(prefix="/trade/chart", tags=["trade-chart"])
 
@@ -39,22 +37,10 @@ def trade_chart_data(
 @router.get("/events")
 def trade_chart_events(
     symbol: str = Query("APTUSDT"),
-    limit: int = Query(500, ge=1, le=5000),
-    within_seconds: int = Query(60, ge=1, le=300),
+    tf: str = Query("30"),
+    limit: int = Query(500, ge=10, le=5000),
 ):
-    conn = get_conn()
-    rows = build_chart_events(
-        conn,
-        symbol=symbol,
-        limit=limit,
-        within_seconds=within_seconds,
-    )
-    return {
-        "ok": True,
-        "symbol": symbol,
-        "count": len(rows),
-        "events": rows,
-    }
+    return build_trade_events_payload(symbol=symbol, tf=tf, limit=limit)
 
 
 @router.get("/status")

@@ -111,7 +111,6 @@
       if (strategy) target.searchParams.set('strategy', strategy);
       if (optId) target.searchParams.set('opt_id', optId);
       if (limit) target.searchParams.set('limit', limit);
-
       if (last) target.searchParams.set('opt_last', last);
 
       window.location.href = target.toString();
@@ -267,8 +266,8 @@
           <td>${fmtTs(r.exit_ts)}</td>
           <td>${fmtNum(r.entry_price)}</td>
           <td>${fmtNum(r.exit_price)}</td>
-          <td>${fmtNum(r.pnl_usd)}</td>
-          <td>${fmtNum(r.cum_pnl_usd)}</td>
+          <td>${fmtNum2(r.pnl_usd)}</td>
+          <td>${fmtNum2(r.cum_pnl_usd)}</td>
         `;
         tbody.appendChild(tr);
       }
@@ -276,7 +275,7 @@
 
     function fmtTs(v) {
       if (!v) return '';
-      const d = new Date(v - 3 * 60 * 60 * 1000);
+      const d = new Date(v);
       const yyyy = d.getUTCFullYear();
       const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
       const dd = String(d.getUTCDate()).padStart(2, '0');
@@ -289,6 +288,14 @@
     function fmtNum(v) {
       if (v === null || v === undefined || v === '') return '';
       return Number(v).toLocaleString(undefined, { maximumFractionDigits: 6 });
+    }
+
+    function fmtNum2(v) {
+      if (v === null || v === undefined || v === '') return '';
+      return Number(v).toLocaleString(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
     }
 
     syncControlsFromUrl();

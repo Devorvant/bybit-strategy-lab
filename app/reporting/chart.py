@@ -1546,21 +1546,20 @@ def make_chart_html(
     }}
 
 
-function openTradeChart() {
+function openTradeChart() {{
   const current = new URL(window.location.href);
   const form = document.getElementById('chartForm');
 
-  const formValue = (selector, fallback = '') => {
+  const formValue = (selector, fallback = '') => {{
     const el = form ? form.querySelector(selector) : document.querySelector(selector);
     return (el && el.value != null && String(el.value).trim() !== '') ? String(el.value).trim() : fallback;
-  };
+  }};
 
   const symbol = formValue('[name="symbol"]', current.searchParams.get('symbol') || 'APTUSDT');
   const tf = formValue('[name="tf"]', current.searchParams.get('tf') || '30');
   const strategy = formValue('[name="strategy"]', current.searchParams.get('strategy') || 'my_strategy3.py');
   const limit = formValue('[name="limit"]', current.searchParams.get('limit') || '2000');
 
-  // На основном /chart у тебя используется opt_last, а не last.
   const last = current.searchParams.get('opt_last') || current.searchParams.get('last') || '20';
 
   let optId = current.searchParams.get('opt_id') || '';
@@ -1569,9 +1568,9 @@ function openTradeChart() {
     document.getElementById('opt_id') ||
     document.querySelector('[name="opt_id"]');
 
-  if (optSelect && optSelect.value && String(optSelect.value).trim() !== '') {
+  if (optSelect && optSelect.value && String(optSelect.value).trim() !== '') {{
     optId = String(optSelect.value).trim();
-  }
+  }}
 
   const target = new URL('/trade/chart', window.location.origin);
   target.searchParams.set('symbol', symbol);
@@ -1582,7 +1581,7 @@ function openTradeChart() {
   if (optId) target.searchParams.set('opt_id', optId);
 
   window.location.href = target.toString();
-}
+}}
 
 
     document.addEventListener("DOMContentLoaded", () => {{

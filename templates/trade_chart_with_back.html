@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Стратегия vs Торговля</title>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    body { background:#061225; color:#e6eef8; font-family:Arial,sans-serif; margin:0; padding:16px; }
+    .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+    .card { border:1px solid #1d3557; border-radius:10px; padding:12px; background:#0a1830; }
+    .grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:12px; }
+    .muted { color:#9fb3c8; }
+    #chartWrap { height:650px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { border-bottom:1px solid #1d3557; padding:8px; text-align:left; }
+    th { color:#9fb3c8; }
+    input, select, button {
+      background:#0c1d39; color:#fff; border:1px solid #29476d; border-radius:8px; padding:8px 10px;
+    }
+    button { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <button type="button" onclick="backToMainChart()">← Основной chart</button>
+
+    <label>Symbol <input id="symbol" value="APTUSDT"></label>
+    <label>TF <input id="tf" value="30"></label>
+    <label>Strategy <input id="strategy" value="my_strategy3.py"></label>
+    <label>Opt ID <input id="opt_id" value=""></label>
+    <label>Last <input id="last" value="20"></label>
+    <label>Limit <input id="limit" value="2000"></label>
+
+    <button type="button" onclick="loadTradeChart()">Обновить</button>
+  </div>
+
+  <div class="grid">
+    <div class="card"><div class="muted">Mode</div><div id="modeVal">-</div></div>
+    <div class="card"><div class="muted">Trades total</div><div id="tradesTotal">-</div></div>
+    <div class="card"><div class="muted">Winrate</div><div id="winrate">-</div></div>
+    <div class="card"><div class="muted">PnL USD</div><div id="pnlUsd">-</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px;">
+    <div class="muted">Live status</div>
+    <div id="liveStatus">-</div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px;">
+    <div id="chartWrap"></div>
+  </div>
+
+  <div class="card">
+    <h3>Сделки стратегии</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Сторона</th>
+          <th>Причина</th>
+          <th>Вход</th>
+          <th>Выход</th>
+          <th>Цена входа</th>
+          <th>Цена выхода</th>
+          <th>PnL</th>
+        </tr>
+      </thead>
+      <tbody id="strategyTradesBody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    function getParam(name, fallback='') {
+      const u = new URL(window.location.href);
+      return u.searchParams.get(name) || fallback;
+    }
+
+    function backToMainChart() {
+      const current = new URL(window.location.href);
+      const target = new URL('/chart', window.location.origin);
+
+      const keys = ['symbol', 'tf', 'strategy', 'opt_id', 'limit'];
+      for (const key of keys) {
+        const v = current.searchParams.get(key);
+        if (v) target.searchParams.set(key, v);
+      }
+
+      const symbol = document.getElementById('symbol')?.value;
+      const tf = document.getElementById('tf')?.value;
+      const strategy = document.getElementById('strategy')?.value;
+      const optId = document.getElementById('opt_id')?.value;
+      const limit = document.getElementById('limit')?.value;
+      const last = document.getElementById('last')?.value;
+
+      if (symbol) target.searchParams.set('symbol', symbol);
+      if (tf) target.searchParams.set('tf', tf);
+      if (strategy) target.searchParams.set('strategy', strategy);
+      if (optId) target.searchParams.set('opt_id', optId);
+      if (limit) target.searchParams.set('limit', limit);
+
+      if (last) target.searchParams.set('opt_last', last);
+
+      window.location.href = target.toString();
+    }
+
+    function syncControlsFromUrl() {
+      document.getElementById('symbol').value = getParam('symbol', 'APTUSDT');
+      document.getElementById('tf').value = getParam('tf', '30');
+      document.getElementById('strategy').value = getParam('strategy', 'my_strategy3.py');
+      document.getElementById('opt_id').value = getParam('opt_id', '');
+      document.getElementById('last').value = getParam('last', '20');
+      document.getElementById('limit').value = getParam('limit', '2000');
+    }
+
+    async function loadTradeChart() {
+      const symbol = document.getElementById('symbol').value;
+      const tf = document.getElementById('tf').value;
+      const strategy = document.getElementById('strategy').value;
+      const optId = document.getElementById('opt_id').value;
+      const last = document.getElementById('last').value;
+      const limit = document.getElementById('limit').value;
+
+      const url = new URL('/trade/chart/data', window.location.origin);
+      url.searchParams.set('symbol', symbol);
+      url.searchParams.set('tf', tf);
+      url.searchParams.set('strategy', strategy);
+      url.searchParams.set('last', last);
+      url.searchParams.set('limit', limit);
+      if (optId) url.searchParams.set('opt_id', optId);
+
+      const res = await fetch(url.toString());
+      const data = await res.json();
+
+      const pageUrl = new URL(window.location.href);
+      pageUrl.searchParams.set('symbol', symbol);
+      pageUrl.searchParams.set('tf', tf);
+      pageUrl.searchParams.set('strategy', strategy);
+      pageUrl.searchParams.set('last', last);
+      pageUrl.searchParams.set('limit', limit);
+      if (optId) pageUrl.searchParams.set('opt_id', optId);
+      window.history.replaceState({}, '', pageUrl.toString());
+
+      renderSummary(data);
+      renderChart(data);
+      renderStrategyTrades(data);
+    }
+
+    function renderSummary(data) {
+      document.getElementById('modeVal').textContent = data?.context?.mode || '-';
+      document.getElementById('tradesTotal').textContent = data?.strategy?.summary?.trades_total ?? '-';
+      document.getElementById('winrate').textContent = data?.strategy?.summary?.winrate ?? '-';
+      document.getElementById('pnlUsd').textContent = data?.strategy?.summary?.realized_pnl_usd ?? '-';
+
+      const liveAvailable = data?.status?.live_available;
+      document.getElementById('liveStatus').textContent = liveAvailable
+        ? 'Live trading available'
+        : 'Live trading unavailable';
+    }
+
+    function renderChart(data) {
+      const bars = data?.chart?.bars || [];
+      const equity = data?.chart?.equity || [];
+      const strategyEvents = data?.strategy?.events || [];
+
+      const candle = {
+        type: 'candlestick',
+        x: bars.map(b => new Date(b.ts)),
+        open: bars.map(b => b.open),
+        high: bars.map(b => b.high),
+        low: bars.map(b => b.low),
+        close: bars.map(b => b.close),
+        name: 'OHLC'
+      };
+
+      const entryEvents = strategyEvents.filter(e => e.display_category === 'entry');
+      const exitEvents = strategyEvents.filter(e => e.display_category === 'exit');
+
+      const entriesTrace = {
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Strategy Entry',
+        x: entryEvents.map(e => new Date(e.ts)),
+        y: entryEvents.map(e => e.price),
+        text: entryEvents.map(e => e.kind),
+        marker: { size: 9, symbol: 'triangle-up' }
+      };
+
+      const exitsTrace = {
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Strategy Exit',
+        x: exitEvents.map(e => new Date(e.ts)),
+        y: exitEvents.map(e => e.price),
+        text: exitEvents.map(e => e.kind),
+        marker: { size: 9, symbol: 'x' }
+      };
+
+      const traces = [candle, entriesTrace, exitsTrace];
+
+      if (equity.length) {
+        traces.push({
+          type: 'scatter',
+          mode: 'lines',
+          name: 'Equity',
+          x: equity.map(e => new Date(e.ts)),
+          y: equity.map(e => e.value),
+          yaxis: 'y2'
+        });
+      }
+
+      const layout = {
+        paper_bgcolor: '#0a1830',
+        plot_bgcolor: '#0a1830',
+        font: { color: '#e6eef8' },
+        xaxis: { rangeslider: { visible: false } },
+        yaxis: { title: 'Price' },
+        yaxis2: {
+          title: 'Equity',
+          overlaying: 'y',
+          side: 'right',
+          showgrid: false
+        },
+        legend: { orientation: 'h' },
+        margin: { t: 20, r: 50, b: 40, l: 50 }
+      };
+
+      Plotly.newPlot('chartWrap', traces, layout, { responsive: true });
+    }
+
+    function renderStrategyTrades(data) {
+      const tbody = document.getElementById('strategyTradesBody');
+      tbody.innerHTML = '';
+
+      const rows = data?.strategy?.trades || [];
+      for (const r of rows) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.trade_id ?? ''}</td>
+          <td>${r.side ?? ''}</td>
+          <td>${r.reason ?? ''}</td>
+          <td>${fmtTs(r.entry_ts)}</td>
+          <td>${fmtTs(r.exit_ts)}</td>
+          <td>${fmtNum(r.entry_price)}</td>
+          <td>${fmtNum(r.exit_price)}</td>
+          <td>${fmtNum(r.pnl_usd)}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function fmtTs(v) {
+      if (!v) return '';
+      return new Date(v).toLocaleString();
+    }
+
+    function fmtNum(v) {
+      if (v === null || v === undefined || v === '') return '';
+      return Number(v).toLocaleString(undefined, { maximumFractionDigits: 6 });
+    }
+
+    syncControlsFromUrl();
+    loadTradeChart();
+  </script>
+</body>
+</html>

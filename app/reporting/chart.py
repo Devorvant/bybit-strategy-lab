@@ -2463,6 +2463,7 @@ function mtRenderLivePosition(payload) {{
     <input name="limit" value="{int(limit)}" style="width:90px"/>
 
     <button class="apply" type="submit">Apply</button>
+    <button type="button" onclick="openTradeChart()">Стратегия vs Торговля</button>
   </form>
 
   <div class="tf-row">{tf_buttons_html}</div>

@@ -57,24 +57,53 @@
   </div>
 
   <div class="card">
-    <h3>Сделки стратегии</h3>
-    <table>
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Тип</th>
-          <th>Сторона</th>
-          <th>Причина</th>
-          <th>Вход</th>
-          <th>Выход</th>
-          <th>Цена входа</th>
-          <th>Цена выхода</th>
-          <th>PnL</th>
-          <th>Накопл. PnL</th>
-        </tr>
-      </thead>
-      <tbody id="strategyTradesBody"></tbody>
-    </table>
+    <div class="row" style="margin-bottom:10px;">
+      <button type="button" id="tabStrategyBtn" onclick="showTradeTab('strategy')">Сделки стратегии</button>
+      <button type="button" id="tabLiveBtn" onclick="showTradeTab('live')">Реальные сделки</button>
+    </div>
+
+    <div id="strategyTab">
+      <h3>Сделки стратегии</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Тип</th>
+            <th>Сторона</th>
+            <th>Причина</th>
+            <th>Вход</th>
+            <th>Выход</th>
+            <th>Цена входа</th>
+            <th>Цена выхода</th>
+            <th>PnL</th>
+            <th>Накопл. PnL</th>
+          </tr>
+        </thead>
+        <tbody id="strategyTradesBody"></tbody>
+      </table>
+    </div>
+
+    <div id="liveTab" style="display:none;">
+      <h3>Реальные сделки</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Время</th>
+            <th>Тип</th>
+            <th>Сторона</th>
+            <th>Источник</th>
+            <th>Цена</th>
+            <th>Qty</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody id="liveTradesBody"></tbody>
+      </table>
+      <div id="liveTradesEmpty" class="muted" style="display:none; margin-top:10px;">
+        Нет live-данных
+      </div>
+    </div>
   </div>
 
   <script>
@@ -89,6 +118,25 @@
       if (mode === 'strategy_only') return 'Только стратегия';
       if (mode === 'compare') return 'Стратегия + Реал';
       return mode || '-';
+    }
+
+    function showTradeTab(tabName) {
+      const strategyTab = document.getElementById('strategyTab');
+      const liveTab = document.getElementById('liveTab');
+      const strategyBtn = document.getElementById('tabStrategyBtn');
+      const liveBtn = document.getElementById('tabLiveBtn');
+
+      if (tabName === 'strategy') {
+        strategyTab.style.display = '';
+        liveTab.style.display = 'none';
+        strategyBtn.style.background = '#16325c';
+        liveBtn.style.background = '#0c1d39';
+      } else {
+        strategyTab.style.display = 'none';
+        liveTab.style.display = '';
+        strategyBtn.style.background = '#0c1d39';
+        liveBtn.style.background = '#16325c';
+      }
     }
 
     function backToMainChart() {
@@ -159,6 +207,7 @@
       renderPriceChart(data);
       renderEquityChart(data);
       renderStrategyTrades(data);
+      renderLiveTrades(data);
     }
 
     function renderSummary(data) {
@@ -324,6 +373,36 @@
       }
     }
 
+    function renderLiveTrades(data) {
+      const tbody = document.getElementById('liveTradesBody');
+      const empty = document.getElementById('liveTradesEmpty');
+      tbody.innerHTML = '';
+
+      const rows = data?.live?.events || [];
+
+      if (!rows.length) {
+        empty.style.display = 'block';
+        return;
+      }
+
+      empty.style.display = 'none';
+
+      rows.forEach((r, idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${idx + 1}</td>
+          <td>${fmtTs(r.ts)}</td>
+          <td>${r.kind ?? ''}</td>
+          <td>${r.side ?? ''}</td>
+          <td>${r.source ?? ''}</td>
+          <td>${fmtNum(r.price)}</td>
+          <td>${fmtNum(r.qty)}</td>
+          <td>${r.note ?? ''}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
     function fmtTs(v) {
       if (!v) return '';
       const d = new Date(v);
@@ -350,6 +429,7 @@
     }
 
     syncControlsFromUrl();
+    showTradeTab('strategy');
     loadTradeChart();
   </script>
 </body>

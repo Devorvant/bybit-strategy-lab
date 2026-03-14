@@ -251,7 +251,23 @@
       tbody.innerHTML = '';
 
       const rows = data?.strategy?.trades || [];
-      for (const r of rows) {
+      const fromTs = data?.chart?.range?.from_ts ?? null;
+      const toTs = data?.chart?.range?.to_ts ?? null;
+
+      const visibleRows = rows.filter(r => {
+        const entryTs = r.entry_ts || 0;
+        const exitTs = r.exit_ts || entryTs;
+
+        if (!fromTs || !toTs) return true;
+
+        return (
+          (entryTs >= fromTs && entryTs <= toTs) ||
+          (exitTs >= fromTs && exitTs <= toTs) ||
+          (entryTs <= toTs && exitTs >= fromTs)
+        );
+      });
+
+      for (const r of visibleRows) {
         const tr = document.createElement('tr');
         tr.innerHTML = `
           <td>${r.trade_id ?? ''}</td>

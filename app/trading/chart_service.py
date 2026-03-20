@@ -42,7 +42,7 @@ def _build_compare_rows_auto_by_code(
 ) -> list[dict[str, Any]]:
     auto_real = [
         r for r in (real_trades or [])
-        if str(r.get("source") or "").lower() == "auto"
+        if str(r.get("source") or "").lower() in {"auto", "mixed"}
     ]
 
     real_map: dict[str, dict[str, Any]] = {}

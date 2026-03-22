@@ -5,7 +5,7 @@ import sqlite3
 import time
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any 
 
 
 def _jsonable(value: Any) -> Any:
